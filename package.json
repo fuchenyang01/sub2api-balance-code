@@ -15,7 +15,7 @@
     "typecheck": "vue-tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "playwright test"
+    "test:e2e": "npm run build:web && playwright test"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.1",
