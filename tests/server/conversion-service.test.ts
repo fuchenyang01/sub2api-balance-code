@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest'
 
 import { ConversionService } from '../../src/server/conversion/service.js'
 import { AppError } from '../../src/server/errors.js'
-import type { OperationPayload } from '../../src/server/security/secrets.js'
+import type { ExecuteResponse } from '../../src/shared/contracts.js'
+import { SecretsService, type OperationPayload } from '../../src/server/security/secrets.js'
 import type { AdminClient } from '../../src/server/sub2api/admin-client.js'
 import { UpstreamError, type UpstreamErrorKind } from '../../src/server/sub2api/http.js'
 import type { RedeemCode } from '../../src/server/sub2api/types.js'
@@ -55,9 +56,11 @@ function code(overrides: Partial<RedeemCode> = {}): RedeemCode {
 class FakeUserClient implements UserClient {
   profile = { id: userId, username: 'alice', balance: 100, status: 'active' }
   calls: string[] = []
+  error: unknown
 
   async getProfile(userJwt: string): Promise<typeof this.profile> {
     this.calls.push(userJwt)
+    if (this.error !== undefined) throw this.error
     return this.profile
   }
 }
@@ -86,6 +89,20 @@ class FakeSecrets {
   async verifyOperation(token: string, expectedUserId: number): Promise<OperationPayload> {
     this.verified.push([token, expectedUserId])
     return this.payload
+  }
+}
+
+class TestConversionService extends ConversionService {
+  execute(operationToken: string, userId: number): Promise<ExecuteResponse>
+  execute(operationToken: string, userJwt: string, userId: number): Promise<ExecuteResponse>
+  override execute(
+    operationToken: string,
+    userJwtOrUserId: string | number,
+    explicitUserId?: number,
+  ): Promise<ExecuteResponse> {
+    const userId = explicitUserId ?? userJwtOrUserId as number
+    const userJwt = typeof userJwtOrUserId === 'string' ? userJwtOrUserId : `user-${userId}-jwt`
+    return super.execute(operationToken, userJwt, userId)
   }
 }
 
@@ -149,7 +166,7 @@ function upstream(kind: UpstreamErrorKind, status?: number): UpstreamError {
 }
 
 function setup(): {
-  service: ConversionService
+  service: TestConversionService
   users: FakeUserClient
   admin: FakeAdminClient
   secrets: FakeSecrets
@@ -158,7 +175,7 @@ function setup(): {
   const admin = new FakeAdminClient()
   const secrets = new FakeSecrets()
   return {
-    service: new ConversionService(users, admin, secrets),
+    service: new TestConversionService(users, admin, secrets),
     users,
     admin,
     secrets,
@@ -224,6 +241,44 @@ describe('ConversionService.prepare', () => {
 })
 
 describe('ConversionService.execute', () => {
+  it('terminates on a live insufficient balance before any admin request', async () => {
+    const { service, users, admin } = setup()
+    users.profile = { ...users.profile, balance: 9.99 }
+
+    await expectAppError(
+      () => service.execute('operation-token', 'user-jwt', userId),
+      'OPERATION_TERMINATED',
+    )
+    expect(users.calls).toEqual(['user-jwt'])
+    expect(admin.calls).toEqual([])
+  })
+
+  it('rejects a live profile belonging to a different session user before any admin request', async () => {
+    const { service, users, admin } = setup()
+    users.profile = { ...users.profile, id: 8 }
+
+    await expectAppError(
+      () => service.execute('operation-token', 'user-jwt', userId),
+      'SESSION_INVALID',
+    )
+    expect(admin.calls).toEqual([])
+  })
+
+  it.each([
+    ['auth', 'SESSION_EXPIRED'],
+    ['timeout', 'UPSTREAM_UNAVAILABLE'],
+    ['invalid-response', 'UPSTREAM_UNAVAILABLE'],
+  ] as const)('maps a live profile %s failure safely before any admin request', async (kind, errorCode) => {
+    const { service, users, admin } = setup()
+    users.error = upstream(kind)
+
+    await expectAppError(
+      () => service.execute('operation-token', 'user-jwt', userId),
+      errorCode,
+    )
+    expect(admin.calls).toEqual([])
+  })
+
   it('completes in generate, lookup, validate, debit order with stable idempotency keys', async () => {
     const { service, admin } = setup()
 
@@ -388,7 +443,7 @@ describe('ConversionService.execute', () => {
     expect(admin.calls.some(([name]) => name === 'debit')).toBe(false)
   })
 
-  it('deletes an unpublished code and terminates on definite insufficient balance', async () => {
+  it('supports future structured insufficient-balance evidence with safe compensation', async () => {
     const { service, admin } = setup()
     admin.debitErrors.push(upstream('insufficient-balance', 409))
 
@@ -607,6 +662,21 @@ describe('ConversionService.execute', () => {
     expect(admin.calls.some(([name]) => name === 'delete')).toBe(false)
   })
 
+  it('keeps the locked sub2api generic debit 500 pending without deleting or exposing a code', async () => {
+    const { service, admin } = setup()
+    admin.debitErrors.push(new UpstreamError('http', 'internal error', { status: 500 }))
+
+    const result = await service.execute('operation-token', userId)
+
+    expect(result).toEqual({
+      status: 'pending',
+      operation_id: operationId,
+      error: 'CONVERSION_PENDING',
+    })
+    expect(result).not.toHaveProperty('code')
+    expect(admin.calls.some(([name]) => name === 'delete')).toBe(false)
+  })
+
   it('maps a definite debit request error without deleting or exposing the code', async () => {
     const { service, admin } = setup()
     admin.debitErrors.push(upstream('http', 400))
@@ -643,6 +713,64 @@ describe('ConversionService.execute', () => {
     await expect(service.execute('invalid', userId)).rejects.toBe(invalid)
     gate.resolve()
     await first
+  })
+
+  it('reverifies inside the lock and rejects a token that expires while queued', async () => {
+    let currentTime = new Date(now)
+    const realSecrets = new SecretsService({
+      sessionSecret: 'session-secret-that-is-at-least-32-bytes',
+      operationSigningSecret: 'operation-secret-that-is-at-least-32-bytes',
+      operationTtlMinutes: 1,
+      now: () => currentTime,
+    })
+    const firstSigned = await realSecrets.signOperation({
+      operationId,
+      userId,
+      amount: '10',
+    })
+    const secondSigned = await realSecrets.signOperation({
+      operationId: secondOperationId,
+      userId,
+      amount: '10',
+    })
+    const secondVerifiedOutside = deferred()
+    const verificationCalls: string[] = []
+    const verifyingSecrets = {
+      signOperation: realSecrets.signOperation.bind(realSecrets),
+      verifyOperation: async (token: string, expectedUserId: number) => {
+        verificationCalls.push(token)
+        const payload = await realSecrets.verifyOperation(token, expectedUserId)
+        if (token === secondSigned.token && verificationCalls.filter((value) => value === token).length === 1) {
+          secondVerifiedOutside.resolve()
+        }
+        return payload
+      },
+    }
+    const users = new FakeUserClient()
+    const admin = new FakeAdminClient()
+    const service = new ConversionService(users, admin, verifyingSecrets)
+    const firstEntered = deferred()
+    const firstRelease = deferred()
+    admin.generateHooks.set(operationId, async () => {
+      firstEntered.resolve()
+      await firstRelease.promise
+    })
+
+    const first = service.execute(firstSigned.token, 'user-jwt', userId)
+    await firstEntered.promise
+    const second = service.execute(secondSigned.token, 'user-jwt', userId)
+    const secondExpectation = expectAppError(() => second, 'OPERATION_TOKEN_EXPIRED')
+    await secondVerifiedOutside.promise
+    currentTime = new Date('2026-07-13T08:01:01.000Z')
+    firstRelease.resolve()
+
+    await first
+    await secondExpectation
+    expect(verificationCalls.filter((token) => token === secondSigned.token)).toHaveLength(2)
+    expect(users.calls).toEqual(['user-jwt'])
+    expect(admin.calls.some(([name, key]) =>
+      name === 'generate' && key === `code-${secondOperationId}`,
+    )).toBe(false)
   })
 
   it('rejects a token amount that cannot be converted exactly before calling admin APIs', async () => {
@@ -687,7 +815,7 @@ describe('ConversionService.execute', () => {
   })
 
   it('allows different users with different operations to execute concurrently', async () => {
-    const { service, admin, secrets } = setup()
+    const { service, users, admin, secrets } = setup()
     const firstEntered = deferred()
     const firstRelease = deferred()
     const secondEntered = deferred()
@@ -695,6 +823,10 @@ describe('ConversionService.execute', () => {
       token === 'first-token'
         ? secrets.payload
         : { ...secrets.payload, operationId: secondOperationId, userId: 8 }
+    users.getProfile = async (token) => ({
+      ...users.profile,
+      id: token === 'user-8-jwt' ? 8 : userId,
+    })
     admin.generateHooks.set(operationId, async () => {
       firstEntered.resolve()
       await firstRelease.promise

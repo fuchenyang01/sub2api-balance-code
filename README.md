@@ -7,7 +7,7 @@
 ## 生产约束
 
 - 只能运行一个进程实例、一个容器副本。禁止水平扩容、滚动更新期间双实例并行或多节点主动服务。同用户锁位于进程内，而 sub2api 的“生成码”和“扣余额”是两个非原子管理员请求；多实例会绕过锁并扩大竞态窗口。
-- `OPERATION_TTL_MINUTES` 必须小于或等于 sub2api 管理员写操作的幂等 TTL。超过上游 TTL 后，不能安全地自动恢复操作。
+- `OPERATION_TTL_MINUTES` 必须严格小于 sub2api 管理员写操作的幂等 TTL。达到或超过上游 TTL 后，不能安全地自动恢复操作。
 - 生产环境必须使用 HTTPS，`COOKIE_SECURE=true`。服务必须位于可信反向代理后方，且不能将容器端口直接暴露到公网。
 - 浏览器必须支持 [Web Locks API](https://developer.mozilla.org/docs/Web/API/Web_Locks_API)。不支持或锁服务异常时，前端会 fail closed，不会执行开码。
 - 本工具不提供资金级原子性。进程重启会丢失内存锁；上游生成码与扣款之间可能中断；管理员扣款与模型消费可能发生读写竞态；极端故障可能留下未展示给用户的孤立兑换码。
@@ -24,7 +24,7 @@
 | `SESSION_SECRET` | 无，必填 | 加密 HttpOnly 会话 Cookie 的独立随机秘密，至少 32 UTF-8 字节。 |
 | `OPERATION_SIGNING_SECRET` | 无，必填 | 签名操作令牌的另一条独立随机秘密，至少 32 UTF-8 字节，禁止与会话密钥复用。 |
 | `PORT` | `3000` | HTTP 监听端口，范围 1-65535。 |
-| `OPERATION_TTL_MINUTES` | `60` | 操作令牌有效分钟数，范围 1-1440，且不得超过 sub2api 管理员写幂等 TTL。 |
+| `OPERATION_TTL_MINUTES` | `60` | 操作令牌有效分钟数，范围 1-1440，且必须严格小于 sub2api 管理员写幂等 TTL。 |
 | `UPSTREAM_TIMEOUT_MS` | `10000` | 单次上游请求超时，范围 1000-60000 毫秒。 |
 | `TRUST_PROXY` | `false` | 仅当服务只能从可信反向代理访问时设为 `true`，用于取得真实客户端 IP。 |
 | `LOG_LEVEL` | `info` | `fatal`、`error`、`warn`、`info`、`debug`、`trace` 或 `silent`。生产建议 `info`。 |
@@ -85,6 +85,10 @@ SameSite=Lax 会话只支持以下两类 iframe 部署：
 完全不同站点只支持独立窗口，不支持 iframe。本工具不会改用 `SameSite=None` 绕过限制，因为浏览器仍可能阻止第三方 Cookie。入口 JWT 交换后会从地址栏移除，但代理日志必须从一开始就忽略 query string。
 
 ## pending 与人工核对
+
+执行时，服务会在同用户进程锁内重新验证操作令牌，并用加密会话中的用户 JWT 查询实时 profile；明确余额不足时不会调用任何管理员接口。这只能缩小竞态窗口，不能让“生成码”和“扣余额”成为原子操作。生成码之后、扣余额之前，余额仍可能因模型消费或其他请求发生变化。
+
+当前核对的 sub2api 版本在管理员扣款会导致负余额时，只返回通用 HTTP 500 `internal error`，没有可安全识别的 `reason`。因此该响应必须保持 pending 并由管理员核对，工具绝不能据此自动删除兑换码，因为扣款是否发生无法从响应中确定。工具保留了对未来明确返回 `INSUFFICIENT_BALANCE` 或 `balance cannot be negative` 的结构化响应的兼容处理，但这不是当前 sub2api 的接口保证。
 
 页面显示“结果待确认”时，不代表明确失败。按以下顺序处理：
 

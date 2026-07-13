@@ -258,7 +258,7 @@ describe('sub2api clients', () => {
   it.each([
     { message: 'insufficient', reason: 'INSUFFICIENT_BALANCE' },
     { message: 'balance cannot be negative' },
-  ])('classifies explicit insufficient balance evidence', async (body) => {
+  ])('keeps forward compatibility with explicit insufficient balance evidence', async (body) => {
     handler = (_request, response) => json(response, 400, { code: 1, ...body })
     const client = new Sub2ApiAdminClient(baseUrl, 'admin-secret', 1_000)
 

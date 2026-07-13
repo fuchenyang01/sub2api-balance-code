@@ -61,6 +61,13 @@ function terminated(): AppError {
   return new AppError('OPERATION_TERMINATED', 409, '操作已终止')
 }
 
+function executionProfileFailure(error: unknown): AppError {
+  if (isUpstreamError(error, 'auth')) {
+    return new AppError('SESSION_EXPIRED', 401, '会话已过期')
+  }
+  return new AppError('UPSTREAM_UNAVAILABLE', 502, '上游服务不可用')
+}
+
 function validateCode(code: RedeemCode, amount: Decimal): void {
   if (code.type !== 'balance' || !new Decimal(code.value).equals(amount)) {
     throw new AppError('UPSTREAM_DATA_CONFLICT', 502, '上游兑换码数据冲突')
@@ -114,14 +121,33 @@ export class ConversionService {
     }
   }
 
-  async execute(operationToken: string, userId: number): Promise<ExecuteResponse> {
-    const operation = await this.#secrets.verifyOperation(operationToken, userId)
-    return this.#mutex.run(userId, () => this.#executeLocked(operation))
+  async execute(
+    operationToken: string,
+    userJwt: string,
+    userId: number,
+  ): Promise<ExecuteResponse> {
+    await this.#secrets.verifyOperation(operationToken, userId)
+    return this.#mutex.run(userId, async () => {
+      const operation = await this.#secrets.verifyOperation(operationToken, userId)
+      return this.#executeLocked(operation, userJwt)
+    })
   }
 
-  async #executeLocked(operation: OperationPayload): Promise<ExecuteResponse> {
+  async #executeLocked(operation: OperationPayload, userJwt: string): Promise<ExecuteResponse> {
     const amount = parseAmount(operation.amount)
     const upstreamAmount = amountToUpstreamNumber(amount)
+    let profile: Awaited<ReturnType<UserClient['getProfile']>>
+
+    try {
+      profile = await this.#users.getProfile(userJwt)
+    } catch (error) {
+      throw executionProfileFailure(error)
+    }
+    if (profile.id !== operation.userId) {
+      throw new AppError('SESSION_INVALID', 401, '会话用户不一致')
+    }
+    if (amount.gt(new Decimal(profile.balance))) throw terminated()
+
     let generated: RedeemCode
 
     try {

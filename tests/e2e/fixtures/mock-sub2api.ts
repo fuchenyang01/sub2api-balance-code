@@ -20,6 +20,7 @@ export interface MockSub2Api {
   setMode(mode: MockMode): void
   setIframeChildUrl(url: string): void
   totalSuccessfulDebits(): number
+  totalDeletedCodes(): number
   close(): Promise<void>
 }
 
@@ -72,6 +73,7 @@ export async function startMockSub2Api(): Promise<MockSub2Api> {
   let balance = 100
   let nextCodeId = 1
   let successfulDebits = 0
+  let deletedCodes = 0
   let iframeChildUrl: string | null = null
   let closing: Promise<void> | null = null
   const userToken = createTestJwt()
@@ -159,7 +161,10 @@ export async function startMockSub2Api(): Promise<MockSub2Api> {
     if (codeMatch !== null && request.method === 'DELETE') {
       const deleted = codes.delete(Number(codeMatch[1]))
       if (!deleted) json(response, 404, { code: 404, message: 'not found' })
-      else success(response, {})
+      else {
+        deletedCodes += 1
+        success(response, {})
+      }
       return
     }
 
@@ -179,11 +184,7 @@ export async function startMockSub2Api(): Promise<MockSub2Api> {
         return
       }
       if (mode === 'insufficient') {
-        json(response, 400, {
-          code: 1,
-          message: 'balance cannot be negative',
-          reason: 'INSUFFICIENT_BALANCE',
-        })
+        json(response, 500, { code: 1, message: 'internal error' })
         return
       }
       if (mode === 'in-progress') {
@@ -220,6 +221,7 @@ export async function startMockSub2Api(): Promise<MockSub2Api> {
     setMode: (nextMode) => { mode = nextMode },
     setIframeChildUrl: (url) => { iframeChildUrl = url },
     totalSuccessfulDebits: () => successfulDebits,
+    totalDeletedCodes: () => deletedCodes,
     close: () => {
       closing ??= (async () => {
         await closeServer(server)
@@ -228,6 +230,7 @@ export async function startMockSub2Api(): Promise<MockSub2Api> {
         debits.clear()
         balance = 100
         successfulDebits = 0
+        deletedCodes = 0
         iframeChildUrl = null
       })()
       return closing

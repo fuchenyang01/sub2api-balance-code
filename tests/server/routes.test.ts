@@ -69,7 +69,7 @@ class FakeUsers implements UserClient {
 
 class FakeConversions {
   prepareCalls: Array<[string, number, string, string]> = []
-  executeCalls: Array<[string, number]> = []
+  executeCalls: Array<[string, string, number]> = []
   prepareError: unknown
   executeError: unknown
   executeResponse: ExecuteResponse = {
@@ -95,8 +95,8 @@ class FakeConversions {
     }
   }
 
-  async execute(operationToken: string, userId: number): Promise<ExecuteResponse> {
-    this.executeCalls.push([operationToken, userId])
+  async execute(operationToken: string, userJwt: string, userId: number): Promise<ExecuteResponse> {
+    this.executeCalls.push([operationToken, userJwt, userId])
     if (this.executeError !== undefined) throw this.executeError
     return this.executeResponse
   }
@@ -511,7 +511,8 @@ describe('protected conversions', () => {
     ['completed', 200],
   ] as const)('returns %s execution with the stable status', async (state, status) => {
     const { app, conversions } = await setup()
-    const cookie = await cookieFor(app)
+    const userJwt = jwt()
+    const cookie = await cookieFor(app, userJwt)
     conversions.executeResponse =
       state === 'pending'
         ? { status: 'pending', operation_id: operationId, error: 'CONVERSION_PENDING' }
@@ -532,7 +533,7 @@ describe('protected conversions', () => {
 
     expect(response.statusCode).toBe(status)
     expect(response.json()).toEqual(conversions.executeResponse)
-    expect(conversions.executeCalls).toEqual([['operation-secret-token', 7]])
+    expect(conversions.executeCalls).toEqual([['operation-secret-token', userJwt, 7]])
   })
 
   it.each([

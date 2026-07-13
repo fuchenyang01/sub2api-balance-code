@@ -36,6 +36,7 @@ function fakeMock(close = vi.fn(async () => undefined)): MockSub2Api {
     setMode: vi.fn(),
     setIframeChildUrl: vi.fn(),
     totalSuccessfulDebits: vi.fn(() => 0),
+    totalDeletedCodes: vi.fn(() => 0),
     close,
   }
 }

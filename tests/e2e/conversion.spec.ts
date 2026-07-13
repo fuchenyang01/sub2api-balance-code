@@ -47,4 +47,20 @@ test.describe('desktop conversion', () => {
     await page.screenshot({ path: testInfo.outputPath('recovery.png'), fullPage: true })
     expectNoBrowserErrors(errors)
   })
+
+  test('keeps a generic debit 500 pending without deleting or exposing the code', async ({ page, environment }) => {
+    const errors = collectBrowserErrors(page)
+    environment.mock.setMode('insufficient')
+    await page.goto(environment.authenticatedUrl())
+
+    await openConfirmation(page)
+    await page.getByTestId('confirm-conversion').click()
+
+    await expect(page.getByTestId('resume-pending')).toBeVisible()
+    await expect(page.getByText('兑换结果待确认')).toBeVisible()
+    await expect(page.getByText('TEST-CODE-1')).toHaveCount(0)
+    expect(environment.mock.totalSuccessfulDebits()).toBe(0)
+    expect(environment.mock.totalDeletedCodes()).toBe(0)
+    expectNoBrowserErrors(errors)
+  })
 })

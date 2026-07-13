@@ -15,7 +15,7 @@ export interface ConversionOperations {
     operationId: string,
     rawAmount: string,
   ): Promise<PrepareResponse>
-  execute(operationToken: string, userId: number): Promise<ExecuteResponse>
+  execute(operationToken: string, userJwt: string, userId: number): Promise<ExecuteResponse>
 }
 
 const uuidV4Pattern = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
@@ -117,7 +117,11 @@ export function registerConversionRoutes(
     },
     async (request, reply) => {
       const session = sessions.get(request)
-      const response = await conversions.execute(request.body.operation_token, session.userId)
+      const response = await conversions.execute(
+        request.body.operation_token,
+        session.userJwt,
+        session.userId,
+      )
       return reply.code(response.status === 'pending' ? 202 : 200).send(response)
     },
   )
