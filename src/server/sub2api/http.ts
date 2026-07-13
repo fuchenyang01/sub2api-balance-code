@@ -55,13 +55,51 @@ const envelopeSchema = z.object({
 })
 
 const MAX_UPSTREAM_TEXT_LENGTH = 1_024
+const MAX_RESPONSE_BODY_BYTES = 64 * 1_024
 
 function safeText(value: string, sensitiveValues: readonly string[]): string {
-  let safe = value.slice(0, MAX_UPSTREAM_TEXT_LENGTH)
+  let safe = value
   for (const sensitiveValue of sensitiveValues) {
     if (sensitiveValue.length > 0) safe = safe.split(sensitiveValue).join('[REDACTED]')
   }
-  return safe
+  return safe.slice(0, MAX_UPSTREAM_TEXT_LENGTH)
+}
+
+async function readLimitedText(response: Response): Promise<string> {
+  if (response.body === null) return ''
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let body = ''
+  let bytesRead = 0
+
+  try {
+    while (bytesRead < MAX_RESPONSE_BODY_BYTES) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      const remaining = MAX_RESPONSE_BODY_BYTES - bytesRead
+      const chunk = value.byteLength <= remaining ? value : value.subarray(0, remaining)
+      body += decoder.decode(chunk, { stream: true })
+      bytesRead += chunk.byteLength
+
+      if (chunk.byteLength < value.byteLength) {
+        break
+      }
+    }
+    if (bytesRead === MAX_RESPONSE_BODY_BYTES) await reader.cancel()
+    return body + decoder.decode()
+  } finally {
+    reader.releaseLock()
+  }
+}
+
+function parseJson(value: string): unknown {
+  try {
+    return JSON.parse(value)
+  } catch {
+    return undefined
+  }
 }
 
 function errorKind(status: number, reason: string | undefined, message: string): UpstreamErrorKind {
@@ -95,27 +133,33 @@ export async function requestUpstream<T>(options: UpstreamRequestOptions<T>): Pr
   } catch (error) {
     const name = error instanceof Error ? error.name : ''
     if (name === 'TimeoutError' || name === 'AbortError') {
-      throw new UpstreamError('timeout', 'Upstream request timed out', { cause: error })
+      throw new UpstreamError('timeout', 'Upstream request timed out', {
+        cause: new Error('Upstream transport timeout'),
+      })
     }
-    throw new UpstreamError('network', 'Upstream network request failed', { cause: error })
+    throw new UpstreamError('network', 'Upstream network request failed', {
+      cause: new Error('Upstream transport failure'),
+    })
   }
 
-  let rawEnvelope: unknown
+  let responseText: string
   try {
-    rawEnvelope = await response.json()
+    responseText = await readLimitedText(response)
   } catch {
-    throw invalidResponse(response.status, 'Upstream response was not valid JSON')
+    if (!response.ok) {
+      throw new UpstreamError(errorKind(response.status, undefined, ''), 'Upstream HTTP failure', {
+        status: response.status,
+      })
+    }
+    throw invalidResponse(response.status, 'Upstream response body could not be read')
   }
 
+  const rawEnvelope = parseJson(responseText)
   const parsedEnvelope = envelopeSchema.safeParse(rawEnvelope)
-  if (!parsedEnvelope.success) {
-    throw invalidResponse(response.status, 'Upstream response envelope was invalid')
-  }
-
-  const envelope = parsedEnvelope.data
   if (!response.ok) {
-    const rawMessage = envelope.message ?? 'Upstream HTTP request failed'
-    const rawReason = envelope.reason
+    const envelope = parsedEnvelope.success ? parsedEnvelope.data : undefined
+    const rawMessage = envelope?.message ?? 'Upstream HTTP request failed'
+    const rawReason = envelope?.reason
     const message = safeText(rawMessage, sensitiveValues)
     const reason = rawReason === undefined ? undefined : safeText(rawReason, sensitiveValues)
     throw new UpstreamError(errorKind(response.status, rawReason, rawMessage), message, {
@@ -124,6 +168,14 @@ export async function requestUpstream<T>(options: UpstreamRequestOptions<T>): Pr
     })
   }
 
+  if (rawEnvelope === undefined) {
+    throw invalidResponse(response.status, 'Upstream response was not valid JSON')
+  }
+  if (!parsedEnvelope.success) {
+    throw invalidResponse(response.status, 'Upstream response envelope was invalid')
+  }
+
+  const envelope = parsedEnvelope.data
   if (envelope.code !== 0) {
     const message = safeText(
       envelope.message ?? 'Upstream success response had a nonzero code',

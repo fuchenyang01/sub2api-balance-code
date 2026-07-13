@@ -153,6 +153,16 @@ describe('sub2api clients', () => {
     await expect(client.getCode(99)).resolves.toBeNull()
   })
 
+  it('maps an HTML 404 response to a missing code', async () => {
+    handler = (_request, response) => {
+      response.writeHead(404, { 'content-type': 'text/html' })
+      response.end('<html>not found</html>')
+    }
+    const client = new Sub2ApiAdminClient(baseUrl, 'admin-secret', 1_000)
+
+    await expect(client.getCode(99)).resolves.toBeNull()
+  })
+
   it('maps successful and missing deletes', async () => {
     handler = (request, response) => {
       expect(request.method).toBe('DELETE')
@@ -165,6 +175,16 @@ describe('sub2api clients', () => {
     const client = new Sub2ApiAdminClient(baseUrl, 'admin-secret', 1_000)
 
     await expect(client.deleteCode(11)).resolves.toBe('deleted')
+    await expect(client.deleteCode(99)).resolves.toBe('missing')
+  })
+
+  it('maps an HTML 404 delete response to missing', async () => {
+    handler = (_request, response) => {
+      response.writeHead(404, { 'content-type': 'text/html' })
+      response.end('<html>already deleted</html>')
+    }
+    const client = new Sub2ApiAdminClient(baseUrl, 'admin-secret', 1_000)
+
     await expect(client.deleteCode(99)).resolves.toBe('missing')
   })
 
@@ -191,6 +211,30 @@ describe('sub2api clients', () => {
 
   it.each([401, 403])('classifies HTTP %s as auth', async (status) => {
     handler = (_request, response) => json(response, status, { code: status, message: 'denied' })
+    const client = new Sub2ApiUserClient(baseUrl, 1_000)
+
+    await expect(client.getProfile('user-jwt')).rejects.toSatisfy((error: unknown) =>
+      isUpstreamError(error, 'auth'),
+    )
+  })
+
+  it.each([
+    [401, 'HTML', (_request: IncomingMessage, response: ServerResponse) => {
+      response.writeHead(401, { 'content-type': 'text/html' })
+      response.end('<html>sign in</html>')
+    }],
+    [403, 'empty body', (_request: IncomingMessage, response: ServerResponse) => {
+      response.writeHead(403)
+      response.end()
+    }],
+    [401, 'JSON without code', (_request: IncomingMessage, response: ServerResponse) => {
+      json(response, 401, { message: 'denied' })
+    }],
+    [403, 'JSON without code', (_request: IncomingMessage, response: ServerResponse) => {
+      json(response, 403, { message: 'denied' })
+    }],
+  ] as const)('classifies HTTP %s with %s as auth', async (_status, _body, responseHandler) => {
+    handler = responseHandler
     const client = new Sub2ApiUserClient(baseUrl, 1_000)
 
     await expect(client.getProfile('user-jwt')).rejects.toSatisfy((error: unknown) =>
@@ -294,6 +338,52 @@ describe('sub2api clients', () => {
     await expect(client.getProfile('user-jwt')).rejects.toSatisfy((error: unknown) =>
       isUpstreamError(error, 'network'),
     )
+  })
+
+  it.each([
+    ['network', 'Error'],
+    ['timeout', 'TimeoutError'],
+  ] as const)('does not retain a credential from a %s transport cause', async (kind, name) => {
+    const secret = 'SECRET1234'
+    const transportError = new Error(`transport leaked ${secret}`)
+    transportError.name = name
+    const fetchImpl: typeof fetch = async () => {
+      throw transportError
+    }
+    const client = new Sub2ApiUserClient(baseUrl, 1_000, fetchImpl)
+
+    const error = await client.getProfile(secret).catch((caught: unknown) => caught)
+
+    expect(error).toBeInstanceOf(UpstreamError)
+    expect(error).not.toBe(transportError)
+    expect(isUpstreamError(error, kind)).toBe(true)
+    const cause = (error as UpstreamError).cause
+    const exposed = [String(error), JSON.stringify(error), String(cause)]
+    if (cause instanceof Error) exposed.push(cause.message)
+    for (const value of exposed) {
+      expect(value).not.toContain(secret)
+      expect(value).not.toContain('SECRET12')
+      expect(value).not.toContain('SECRET')
+    }
+  })
+
+  it('redacts a credential crossing the message truncation boundary', async () => {
+    const adminKey = 'admin-SECRET1234'
+    handler = (_request, response) =>
+      json(response, 500, {
+        code: 1,
+        message: `${'x'.repeat(1_020)}${adminKey}-suffix`,
+        reason: 'FAILURE',
+      })
+    const client = new Sub2ApiAdminClient(baseUrl, adminKey, 1_000)
+
+    const error = await client.generateCode('op', 1).catch((caught: unknown) => caught)
+
+    expect(error).toBeInstanceOf(UpstreamError)
+    expect((error as UpstreamError).message.length).toBeLessThanOrEqual(1_024)
+    expect((error as UpstreamError).message).not.toContain(adminKey)
+    expect((error as UpstreamError).message).not.toContain(adminKey.slice(0, 8))
+    expect((error as UpstreamError).message).not.toContain(adminKey.slice(0, 4))
   })
 
   it.each([
