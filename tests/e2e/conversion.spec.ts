@@ -33,7 +33,7 @@ test.describe('desktop conversion', () => {
     environment.mock.setMode('timeout-after-success')
     await page.goto(environment.authenticatedUrl())
 
-    await openConfirmation(page)
+    await openConfirmation(page, '60')
     await page.getByTestId('confirm-conversion').click()
     await expect(page.getByTestId('resume-pending')).toBeVisible()
     await expect(page.getByText('兑换结果待确认')).toBeVisible()
@@ -43,6 +43,8 @@ test.describe('desktop conversion', () => {
     await page.getByTestId('resume-pending').click()
     await expect(page.getByText('生成完成')).toBeVisible()
     await expect(page.locator('.code-row code')).toHaveText('TEST-CODE-1')
+    await expect(page.getByTestId('resume-pending')).toHaveCount(0)
+    await expect(page.locator('.history-section')).toContainText('TEST-CODE-1')
     expect(environment.mock.totalSuccessfulDebits()).toBe(1)
     await page.screenshot({ path: testInfo.outputPath('recovery.png'), fullPage: true })
     expectNoBrowserErrors(errors)

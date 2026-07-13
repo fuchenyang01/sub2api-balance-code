@@ -146,7 +146,6 @@ export class ConversionService {
     if (profile.id !== operation.userId) {
       throw new AppError('SESSION_INVALID', 401, '会话用户不一致')
     }
-    if (amount.gt(new Decimal(profile.balance))) throw terminated()
 
     let generated: RedeemCode
 

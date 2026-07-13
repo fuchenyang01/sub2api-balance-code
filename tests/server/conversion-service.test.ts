@@ -241,16 +241,36 @@ describe('ConversionService.prepare', () => {
 })
 
 describe('ConversionService.execute', () => {
-  it('terminates on a live insufficient balance before any admin request', async () => {
-    const { service, users, admin } = setup()
-    users.profile = { ...users.profile, balance: 9.99 }
+  it('replays the same admin keys when the current balance fell below the amount after a lost debit response', async () => {
+    const { service, users, admin, secrets } = setup()
+    secrets.payload = { ...secrets.payload, amount: '60' }
+    admin.generated = code({ value: 60 })
+    admin.stored = admin.generated
+    admin.debitHook = () => {
+      users.profile = { ...users.profile, balance: 40 }
+    }
+    admin.debitErrors.push(upstream('timeout'))
 
-    await expectAppError(
-      () => service.execute('operation-token', 'user-jwt', userId),
-      'OPERATION_TERMINATED',
-    )
-    expect(users.calls).toEqual(['user-jwt'])
-    expect(admin.calls).toEqual([])
+    await expect(service.execute('operation-token', userId)).resolves.toEqual({
+      status: 'pending',
+      operation_id: operationId,
+      error: 'CONVERSION_PENDING',
+    })
+    await expect(service.execute('operation-token', userId)).resolves.toMatchObject({
+      status: 'completed',
+      operation_id: operationId,
+      amount: '60',
+      code: 'CODE-1',
+    })
+    expect(admin.calls.filter(([name]) => name === 'generate')).toEqual([
+      ['generate', `code-${operationId}`, 60],
+      ['generate', `code-${operationId}`, 60],
+    ])
+    expect(admin.calls.filter(([name]) => name === 'debit')).toEqual([
+      ['debit', userId, `debit-${operationId}`, 60],
+      ['debit', userId, `debit-${operationId}`, 60],
+    ])
+    expect(admin.calls.some(([name]) => name === 'delete')).toBe(false)
   })
 
   it('rejects a live profile belonging to a different session user before any admin request', async () => {
