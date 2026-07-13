@@ -14,12 +14,20 @@ const appController = vi.hoisted((): {
   convert: ReturnType<typeof vi.fn>
   initialize: ReturnType<typeof vi.fn>
   refresh: ReturnType<typeof vi.fn>
+  resumePending: ReturnType<typeof vi.fn>
+  clearHistory: ReturnType<typeof vi.fn>
+  pendingOperation: null | Record<string, unknown>
+  history: Record<string, unknown>[]
 } => ({
   session: 'authenticated',
   error: null,
   convert: vi.fn(),
   initialize: vi.fn(),
   refresh: vi.fn(),
+  resumePending: vi.fn(),
+  clearHistory: vi.fn(),
+  pendingOperation: null,
+  history: [],
 }))
 
 vi.mock('../../src/web/composables/useConversion.js', async (importOriginal) => {
@@ -32,6 +40,8 @@ vi.mock('../../src/web/composables/useConversion.js', async (importOriginal) => 
       profile: ref({ id: 7, username: 'alice', balance: '10' }),
       result: ref(null),
       pending: ref(null),
+      pendingOperation: ref(appController.pendingOperation),
+      history: ref(appController.history),
       error: ref(appController.error),
       loading: ref(false),
       busy: ref(false),
@@ -39,6 +49,8 @@ vi.mock('../../src/web/composables/useConversion.js', async (importOriginal) => 
       refresh: appController.refresh,
       logout: vi.fn(),
       convert: appController.convert,
+      resumePending: appController.resumePending,
+      clearHistory: appController.clearHistory,
     }),
   }
 })
@@ -48,6 +60,8 @@ import AccountBar from '../../src/web/components/AccountBar.vue'
 import ConfirmDialog from '../../src/web/components/ConfirmDialog.vue'
 import ConversionForm from '../../src/web/components/ConversionForm.vue'
 import ConversionResult from '../../src/web/components/ConversionResult.vue'
+import HistoryList from '../../src/web/components/HistoryList.vue'
+import PendingOperation from '../../src/web/components/PendingOperation.vue'
 
 describe('responsive stylesheet', () => {
   it('does not force body wider than a narrow iframe viewport', () => {
@@ -228,6 +242,87 @@ describe('AccountBar', () => {
   })
 })
 
+describe('PendingOperation', () => {
+  it('offers explicit resume and hide actions without implying that hide cancels upstream work', async () => {
+    const wrapper = mount(PendingOperation, {
+      props: {
+        operation: {
+          version: 1,
+          operation_id: 'op-ready',
+          amount: '2.5',
+          state: 'ready',
+          operation_token: 'operation-secret',
+          expires_at: '2099-07-13T01:00:00.000Z',
+        },
+        busy: false,
+      },
+    })
+
+    expect(wrapper.text()).toContain('隐藏不会取消上游操作')
+    expect(wrapper.text()).toContain('op-ready')
+    await wrapper.get('[data-testid="resume-pending"]').trigger('click')
+    await wrapper.get('[data-testid="hide-pending"]').trigger('click')
+    expect(wrapper.emitted('resume')).toHaveLength(1)
+    expect(wrapper.emitted('hide')).toHaveLength(1)
+  })
+
+  it('shows manual review for expired operations and does not allow automatic execution', () => {
+    const wrapper = mount(PendingOperation, {
+      props: {
+        operation: {
+          version: 1,
+          operation_id: 'op-expired',
+          amount: '2.5',
+          state: 'expired',
+          expires_at: '2020-07-13T01:00:00.000Z',
+        },
+        busy: false,
+      },
+    })
+
+    expect(wrapper.text()).toContain('需要管理员核对')
+    expect(wrapper.find('[data-testid="resume-pending"]').exists()).toBe(false)
+  })
+})
+
+describe('HistoryList', () => {
+  const items = [{
+    version: 1 as const,
+    operation_id: 'op-1',
+    amount: '2.5',
+    code: 'CODE-ONE',
+    created_at: '2026-07-13T00:00:00.000Z',
+  }]
+
+  it('copies one code or all history with accessible icon actions', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    const wrapper = mount(HistoryList, { props: { items } })
+
+    const copyOne = wrapper.get('[aria-label="复制兑换码 CODE-ONE"]')
+    expect(copyOne.attributes('title')).toBe('复制兑换码')
+    await copyOne.trigger('click')
+    await wrapper.get('[data-testid="copy-all-history"]').trigger('click')
+
+    expect(writeText).toHaveBeenNthCalledWith(1, 'CODE-ONE')
+    expect(writeText.mock.calls[1]?.[0]).toContain('op-1')
+    expect(writeText.mock.calls[1]?.[0]).toContain('CODE-ONE')
+  })
+
+  it('requires confirmation before emitting clear', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const wrapper = mount(HistoryList, { props: { items } })
+
+    await wrapper.get('[data-testid="clear-history"]').trigger('click')
+    expect(confirm).toHaveBeenCalled()
+    expect(wrapper.emitted('clear')).toBeUndefined()
+
+    confirm.mockReturnValue(true)
+    await wrapper.get('[data-testid="clear-history"]').trigger('click')
+    expect(wrapper.emitted('clear')).toHaveLength(1)
+  })
+})
+
 describe('App', () => {
   it('renders the usable tool immediately and opens confirmation without executing conversion', async () => {
     const wrapper = mount(App)
@@ -258,5 +353,33 @@ describe('App', () => {
 
     appController.session = 'authenticated'
     appController.error = null
+  })
+
+  it('shows stored recovery metadata without its token and hiding lasts only for the current mount', async () => {
+    appController.pendingOperation = {
+      version: 1,
+      operation_id: 'op-recovery',
+      amount: '2.5',
+      state: 'ready',
+      operation_token: 'MUST-NOT-RENDER',
+      expires_at: '2099-07-13T01:00:00.000Z',
+    }
+    const wrapper = mount(App)
+
+    expect(wrapper.text()).toContain('op-recovery')
+    expect(wrapper.text()).not.toContain('MUST-NOT-RENDER')
+    await wrapper.get('input').setValue('1')
+    expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeDefined()
+    await wrapper.get('[data-testid="resume-pending"]').trigger('click')
+    expect(appController.resumePending).toHaveBeenCalledTimes(1)
+    await wrapper.get('[data-testid="hide-pending"]').trigger('click')
+    expect(wrapper.find('[data-testid="resume-pending"]').exists()).toBe(false)
+    expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeDefined()
+
+    wrapper.unmount()
+    const remounted = mount(App)
+    expect(remounted.text()).toContain('op-recovery')
+    remounted.unmount()
+    appController.pendingOperation = null
   })
 })

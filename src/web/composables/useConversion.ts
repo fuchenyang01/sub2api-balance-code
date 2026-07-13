@@ -2,7 +2,9 @@ import { Decimal } from 'decimal.js'
 import { ref, type Ref } from 'vue'
 
 import type { ErrorCode, ExecuteResponse, MeResponse } from '../../shared/contracts.js'
+import type { ExecutableOperation, HistoryItem, PendingOperation } from '../../shared/storage-types.js'
 import { ApiClientError, apiClient, type ConversionApi } from '../api.js'
+import { browserStorage, type ConversionStorage } from '../storage.js'
 
 type CompletedResult = Extract<ExecuteResponse, { status: 'completed' }>
 type PendingResult = Extract<ExecuteResponse, { status: 'pending' }>
@@ -20,6 +22,8 @@ export interface ConversionController {
   profile: Ref<MeResponse | null>
   result: Ref<CompletedResult | null>
   pending: Ref<PendingResult | null>
+  pendingOperation: Ref<PendingOperation | null>
+  history: Ref<HistoryItem[]>
   error: Ref<ConversionError | null>
   loading: Ref<boolean>
   busy: Ref<boolean>
@@ -27,6 +31,8 @@ export interface ConversionController {
   refresh(): Promise<void>
   logout(): Promise<void>
   convert(amount: string): Promise<void>
+  resumePending(): Promise<void>
+  clearHistory(): void
 }
 
 const sessionCodes = new Set<ErrorCode>(['SESSION_REQUIRED', 'SESSION_INVALID', 'SESSION_EXPIRED'])
@@ -118,16 +124,75 @@ function conversionConflict(): ApiClientError {
   return new ApiClientError('UPSTREAM_DATA_CONFLICT', 502, '')
 }
 
-export function createUseConversion(api: ConversionApi): ConversionController {
+function storageFailure(): ConversionError {
+  return {
+    code: 'MANUAL_REVIEW_REQUIRED',
+    message: '无法保存本地恢复信息，请稍后重试',
+    requestId: '',
+    retryable: false,
+  }
+}
+
+function isExpired(operation: ExecutableOperation): boolean {
+  return Date.parse(operation.expires_at) <= Date.now()
+}
+
+export function createUseConversion(
+  api: ConversionApi,
+  storage: ConversionStorage = browserStorage,
+): ConversionController {
   const session = ref<SessionState>('loading')
   const profile = ref<MeResponse | null>(null)
   const result = ref<CompletedResult | null>(null)
   const pending = ref<PendingResult | null>(null)
+  const pendingOperation = ref<PendingOperation | null>(null)
+  const conversionHistory = ref<HistoryItem[]>([])
   const error = ref<ConversionError | null>(null)
   const loading = ref(false)
   const busy = ref(false)
   let initialization: Promise<void> | null = null
   let pendingExchangeToken: string | null = null
+
+  function failStorage(): void {
+    error.value = storageFailure()
+  }
+
+  function persistPending(value: PendingOperation): boolean {
+    if (!storage.savePending(value)) {
+      failStorage()
+      return false
+    }
+    pendingOperation.value = value
+    return true
+  }
+
+  function expirePending(value: ExecutableOperation): void {
+    const expired: PendingOperation = {
+      version: 1,
+      operation_id: value.operation_id,
+      amount: value.amount,
+      state: 'expired',
+      expires_at: value.expires_at,
+    }
+    if (persistPending(expired)) {
+      error.value = {
+        code: 'MANUAL_REVIEW_REQUIRED',
+        message: '本次兑换需要管理员核对',
+        requestId: '',
+        retryable: false,
+      }
+    }
+  }
+
+  function hydrateLocalState(): void {
+    conversionHistory.value = storage.loadHistory()
+    const stored = storage.loadPending()
+    if (stored !== null && (stored.state === 'ready' || stored.state === 'pending') && isExpired(stored)) {
+      expirePending(stored)
+      return
+    }
+    pendingOperation.value = stored
+  }
 
   async function loadProfile(): Promise<void> {
     profile.value = await api.me()
@@ -151,6 +216,7 @@ export function createUseConversion(api: ConversionApi): ConversionController {
     initialization = (async () => {
       loading.value = true
       error.value = null
+      hydrateLocalState()
       const url = new URL(window.location.href)
       applyUrlPreferences(url)
       const token = url.searchParams.get('token')
@@ -205,23 +271,46 @@ export function createUseConversion(api: ConversionApi): ConversionController {
     }
   }
 
-  async function convert(rawAmount: string): Promise<void> {
-    if (busy.value) return
-    busy.value = true
-    error.value = null
-    try {
-      const amount = normalizeAmount(rawAmount)
-      const operationId = crypto.randomUUID()
-      const prepared = await api.prepare({ operation_id: operationId, amount })
-      if (!amountsEqual(prepared.amount, amount)) throw conversionConflict()
+  function publishHistory(response: CompletedResult): boolean {
+    const item: HistoryItem = {
+      version: 1,
+      operation_id: response.operation_id,
+      amount: response.amount,
+      code: response.code,
+      created_at: response.created_at,
+    }
+    const currentHistory = storage.loadHistory()
+    const chronological = [...currentHistory].reverse()
+    chronological.push(item)
+    if (!storage.saveHistory(chronological)) {
+      failStorage()
+      return false
+    }
+    conversionHistory.value = [
+      item,
+      ...currentHistory.filter((entry) => entry.operation_id !== item.operation_id),
+    ].slice(0, 100)
+    return true
+  }
 
-      const response = await api.execute({ operation_token: prepared.operation_token })
-      if (response.operation_id !== operationId) throw conversionConflict()
+  async function executePrepared(operation: ExecutableOperation): Promise<void> {
+    if (isExpired(operation)) {
+      expirePending(operation)
+      return
+    }
+    try {
+      const response = await api.execute({ operation_token: operation.operation_token })
+      if (response.operation_id !== operation.operation_id) throw conversionConflict()
       if (response.status === 'completed') {
-        if (!amountsEqual(response.amount, amount)) throw conversionConflict()
+        if (!amountsEqual(response.amount, operation.amount)) throw conversionConflict()
+        if (!publishHistory(response)) return
+        if (storage.clearPending()) pendingOperation.value = null
+        else failStorage()
         result.value = response
         pending.value = null
       } else {
+        const next: PendingOperation = { ...operation, state: 'pending' }
+        persistPending(next)
         pending.value = {
           status: 'pending',
           operation_id: response.operation_id,
@@ -230,10 +319,87 @@ export function createUseConversion(api: ConversionApi): ConversionController {
         result.value = null
       }
     } catch (caught) {
+      if (caught instanceof ApiClientError && caught.code === 'OPERATION_TOKEN_EXPIRED') {
+        expirePending(operation)
+      } else {
+        if (!(caught instanceof ApiClientError) || retryableCodes.has(caught.code)) {
+          persistPending({ ...operation, state: 'pending' })
+        }
+        handleError(caught)
+      }
+    }
+  }
+
+  async function prepareAndExecute(operation: Extract<PendingOperation, { state: 'preparing' }>): Promise<void> {
+    try {
+      const prepared = await api.prepare({
+        operation_id: operation.operation_id,
+        amount: operation.amount,
+      })
+      if (!amountsEqual(prepared.amount, operation.amount)) throw conversionConflict()
+      const ready: ExecutableOperation = {
+        version: 1,
+        operation_id: operation.operation_id,
+        amount: operation.amount,
+        state: 'ready',
+        operation_token: prepared.operation_token,
+        expires_at: prepared.expires_at,
+      }
+      if (!persistPending(ready)) return
+      await executePrepared(ready)
+    } catch (caught) {
+      handleError(caught)
+    }
+  }
+
+  async function convert(rawAmount: string): Promise<void> {
+    if (busy.value || pendingOperation.value !== null) return
+    busy.value = true
+    error.value = null
+    try {
+      const amount = normalizeAmount(rawAmount)
+      const operationId = crypto.randomUUID()
+      const operation: PendingOperation = {
+        version: 1,
+        operation_id: operationId,
+        amount,
+        state: 'preparing',
+      }
+      if (!persistPending(operation)) return
+      await prepareAndExecute(operation)
+    } catch (caught) {
       handleError(caught)
     } finally {
       busy.value = false
     }
+  }
+
+  async function resumePending(): Promise<void> {
+    if (busy.value || pendingOperation.value === null) return
+    busy.value = true
+    error.value = null
+    try {
+      const operation = pendingOperation.value
+      if (operation.state === 'expired') {
+        error.value = {
+          code: 'MANUAL_REVIEW_REQUIRED',
+          message: '本次兑换需要管理员核对',
+          requestId: '',
+          retryable: false,
+        }
+      } else if (operation.state === 'preparing') {
+        await prepareAndExecute(operation)
+      } else {
+        await executePrepared(operation)
+      }
+    } finally {
+      busy.value = false
+    }
+  }
+
+  function clearHistory(): void {
+    if (storage.clearHistory()) conversionHistory.value = []
+    else failStorage()
   }
 
   return {
@@ -241,6 +407,8 @@ export function createUseConversion(api: ConversionApi): ConversionController {
     profile,
     result,
     pending,
+    pendingOperation,
+    history: conversionHistory,
     error,
     loading,
     busy,
@@ -248,6 +416,8 @@ export function createUseConversion(api: ConversionApi): ConversionController {
     refresh,
     logout,
     convert,
+    resumePending,
+    clearHistory,
   }
 }
 

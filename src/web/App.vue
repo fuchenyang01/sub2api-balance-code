@@ -1,18 +1,22 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { AlertCircle, LockKeyhole } from 'lucide-vue-next'
 
 import AccountBar from './components/AccountBar.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import ConversionForm from './components/ConversionForm.vue'
 import ConversionResult from './components/ConversionResult.vue'
+import HistoryList from './components/HistoryList.vue'
+import PendingOperation from './components/PendingOperation.vue'
 import { useConversion } from './composables/useConversion.js'
 
 const conversion = useConversion()
 const confirmationAmount = ref<string | null>(null)
+const pendingHidden = ref(false)
 const authenticated = computed(() => conversion.session.value === 'authenticated' && conversion.profile.value !== null)
 
 function openConfirmation(amount: string): void {
+  if (conversion.pendingOperation.value !== null) return
   confirmationAmount.value = amount
 }
 
@@ -26,6 +30,13 @@ async function confirmConversion(): Promise<void> {
   await conversion.convert(amount)
   confirmationAmount.value = null
 }
+
+watch(
+  () => conversion.pendingOperation.value?.operation_id,
+  () => {
+    pendingHidden.value = false
+  },
+)
 
 onMounted(() => {
   void conversion.initialize()
@@ -92,14 +103,24 @@ onMounted(() => {
           </div>
         </div>
 
+        <PendingOperation
+          v-if="conversion.pendingOperation.value && !pendingHidden"
+          :operation="conversion.pendingOperation.value"
+          :busy="conversion.busy.value"
+          @resume="conversion.resumePending"
+          @hide="pendingHidden = true"
+        />
+
         <div class="tool-grid">
           <ConversionForm
             :balance="conversion.profile.value!.balance"
-            :busy="conversion.busy.value"
+            :busy="conversion.busy.value || conversion.pendingOperation.value !== null"
             @submit="openConfirmation"
           />
           <ConversionResult :result="conversion.result.value" :pending="conversion.pending.value" />
         </div>
+
+        <HistoryList :items="conversion.history.value" @clear="conversion.clearHistory" />
       </template>
     </main>
 
