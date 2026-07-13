@@ -106,6 +106,18 @@ function toConversionError(caught: unknown): ConversionError {
   }
 }
 
+function amountsEqual(left: string, right: string): boolean {
+  try {
+    return new Decimal(left).equals(new Decimal(right))
+  } catch {
+    return false
+  }
+}
+
+function conversionConflict(): ApiClientError {
+  return new ApiClientError('UPSTREAM_DATA_CONFLICT', 502, '')
+}
+
 export function createUseConversion(api: ConversionApi): ConversionController {
   const session = ref<SessionState>('loading')
   const profile = ref<MeResponse | null>(null)
@@ -201,8 +213,12 @@ export function createUseConversion(api: ConversionApi): ConversionController {
       const amount = normalizeAmount(rawAmount)
       const operationId = crypto.randomUUID()
       const prepared = await api.prepare({ operation_id: operationId, amount })
+      if (!amountsEqual(prepared.amount, amount)) throw conversionConflict()
+
       const response = await api.execute({ operation_token: prepared.operation_token })
+      if (response.operation_id !== operationId) throw conversionConflict()
       if (response.status === 'completed') {
+        if (!amountsEqual(response.amount, amount)) throw conversionConflict()
         result.value = response
         pending.value = null
       } else {

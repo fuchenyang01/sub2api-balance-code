@@ -23,8 +23,10 @@ export interface ConversionApi {
 
 const knownErrorCodes = new Set<string>(errorCodes)
 
-const plainDecimalSchema = z.string()
-  .regex(/^\d+(?:\.\d+)?$/)
+const finitePlainDecimalSchema = z.string()
+  .min(1)
+  .max(1_024)
+  .regex(/^-?\d+(?:\.\d+)?$/)
   .refine((value) => {
     try {
       return new Decimal(value).isFinite()
@@ -33,16 +35,17 @@ const plainDecimalSchema = z.string()
     }
   })
 
-const amountSchema = plainDecimalSchema.refine((value) => new Decimal(value).greaterThan(0))
+const amountSchema = finitePlainDecimalSchema.refine((value) => new Decimal(value).greaterThan(0))
 const isoDateSchema = z.string().refine((value) => (
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)
   && !Number.isNaN(Date.parse(value))
 ))
+const completedTimeSchema = z.string().min(1).max(128)
 const errorCodeSchema = z.enum(errorCodes)
 const meResponseSchema = z.object({
   id: z.number().int().positive(),
   username: z.string(),
-  balance: plainDecimalSchema,
+  balance: finitePlainDecimalSchema,
 }).strict()
 const prepareResponseSchema = z.object({
   operation_token: z.string().min(1),
@@ -55,7 +58,7 @@ const executeResponseSchema = z.discriminatedUnion('status', [
     operation_id: z.string().min(1),
     amount: amountSchema,
     code: z.string().min(1),
-    created_at: isoDateSchema,
+    created_at: completedTimeSchema,
   }).strict(),
   z.object({
     status: z.literal('pending'),

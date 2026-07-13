@@ -200,6 +200,11 @@ describe('useConversion conversion', () => {
   it('stores a pending response without a code and does not expose a previous completion', async () => {
     vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(operationId)
     const client = api({
+      prepare: vi.fn().mockResolvedValue({
+        operation_token: 'operation-secret',
+        expires_at: '2026-07-13T01:00:00.000Z',
+        amount: '2.0',
+      }),
       execute: vi.fn().mockResolvedValue({
         status: 'pending',
         operation_id: operationId,
@@ -241,6 +246,76 @@ describe('useConversion conversion', () => {
       message: '请求过于频繁',
       retryable: true,
     })
+  })
+
+  it('does not execute when prepare returns a different decimal amount', async () => {
+    vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(operationId)
+    const execute = vi.fn()
+    const client = api({
+      prepare: vi.fn().mockResolvedValue({
+        operation_token: 'operation-secret',
+        expires_at: '2026-07-13T01:00:00.000Z',
+        amount: '2',
+      }),
+      execute,
+    })
+    const conversion = createUseConversion(client)
+
+    await conversion.convert('1.00000000')
+
+    expect(execute).not.toHaveBeenCalled()
+    expect(conversion.result.value).toBeNull()
+    expect(conversion.pending.value).toBeNull()
+    expect(conversion.error.value).toMatchObject({ code: 'UPSTREAM_DATA_CONFLICT' })
+  })
+
+  it.each([
+    [
+      'completed operation_id',
+      {
+        status: 'completed' as const,
+        operation_id: 'different-operation',
+        amount: '1',
+        code: 'MUST-NOT-DISPLAY',
+        created_at: '2026-07-13T00:00:00.000Z',
+      },
+    ],
+    [
+      'completed amount',
+      {
+        status: 'completed' as const,
+        operation_id: operationId,
+        amount: '2',
+        code: 'MUST-NOT-DISPLAY',
+        created_at: '2026-07-13T00:00:00.000Z',
+      },
+    ],
+    [
+      'pending operation_id',
+      {
+        status: 'pending' as const,
+        operation_id: 'different-operation',
+        error: 'CONVERSION_PENDING' as const,
+      },
+    ],
+  ])('rejects a mismatched %s without publishing result state', async (_name, response) => {
+    vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(operationId)
+    const client = api({
+      prepare: vi.fn().mockResolvedValue({
+        operation_token: 'operation-secret',
+        expires_at: '2026-07-13T01:00:00.000Z',
+        amount: '1.0',
+      }),
+      execute: vi.fn().mockResolvedValue(response),
+    })
+    const conversion = createUseConversion(client)
+
+    await conversion.convert('1.00000000')
+
+    expect(conversion.result.value).toBeNull()
+    expect(conversion.pending.value).toBeNull()
+    expect(conversion.error.value).toMatchObject({ code: 'UPSTREAM_DATA_CONFLICT' })
+    expect(JSON.stringify(conversion.error.value)).not.toContain('MUST-NOT-DISPLAY')
   })
 })
 
@@ -355,5 +430,58 @@ describe('API client', () => {
       code: 'UPSTREAM_UNAVAILABLE', status: response.status, requestId: '', message: '服务暂时不可用',
     })
     expect((error as Error).message).not.toMatch(/MUST-NOT-BE-RETAINED|RAW-RESPONSE/)
+  })
+
+  it('accepts a finite negative plain-decimal balance from the profile contract', async () => {
+    const client = createApiClient(vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      id: 7, username: 'alice', balance: '-1',
+    }), { status: 200 })))
+
+    await expect(client.me()).resolves.toEqual({ id: 7, username: 'alice', balance: '-1' })
+  })
+
+  it('keeps a completed code when created_at is a bounded non-ISO service string', async () => {
+    const completed = {
+      status: 'completed' as const,
+      operation_id: operationId,
+      amount: '1',
+      code: 'CODE-123',
+      created_at: '2026-07-13 00:00:00',
+    }
+    const client = createApiClient(vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(completed), { status: 200 }),
+    ))
+
+    await expect(client.execute({ operation_token: 'operation-secret' })).resolves.toEqual(completed)
+  })
+
+  it.each([
+    ['NaN', { id: 7, username: 'alice', balance: 'NaN' }],
+    ['Infinity', { id: 7, username: 'alice', balance: 'Infinity' }],
+    ['exponent', { id: 7, username: 'alice', balance: '1e2' }],
+    ['empty', { id: 7, username: 'alice', balance: '' }],
+    ['missing', { id: 7, username: 'alice' }],
+    ['too long', { id: 7, username: 'alice', balance: '9'.repeat(1_025) }],
+  ])('rejects a %s profile balance safely', async (_name, body) => {
+    const client = createApiClient(vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(body), { status: 200 }),
+    ))
+
+    const error = await client.me().catch((caught: unknown) => caught)
+
+    expect(error).toMatchObject({ code: 'UPSTREAM_UNAVAILABLE', status: 200, requestId: '' })
+  })
+
+  it.each(['', 'x'.repeat(129)])('rejects an empty or unbounded completed timestamp safely', async (createdAt) => {
+    const client = createApiClient(vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      status: 'completed', operation_id: operationId, amount: '1', code: 'CODE-123',
+      created_at: createdAt,
+    }), { status: 200 })))
+
+    const error = await client.execute({ operation_token: 'operation-secret' }).catch(
+      (caught: unknown) => caught,
+    )
+
+    expect(error).toMatchObject({ code: 'UPSTREAM_UNAVAILABLE', status: 200, requestId: '' })
   })
 })
