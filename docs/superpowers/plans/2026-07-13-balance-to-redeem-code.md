@@ -104,23 +104,9 @@
 - 创建：`vite.config.ts`
 - 创建：`vitest.config.ts`
 - 创建：`.gitignore`
-- 测试：`tests/server/config.test.ts`
+- 测试：`tests/setup.test.ts`
 
-- [ ] **步骤 1：编写配置加载失败测试**
-
-```ts
-// tests/server/config.test.ts
-import { describe, expect, it } from 'vitest'
-import { loadConfig } from '../../src/server/config.js'
-
-describe('loadConfig', () => {
-  it('rejects missing production secrets', () => {
-    expect(() => loadConfig({ NODE_ENV: 'production' })).toThrow(/SUB2API_BASE_URL/)
-  })
-})
-```
-
-- [ ] **步骤 2：创建 package 脚本并安装依赖**
+- [ ] **步骤 1：创建 package 脚本并安装依赖**
 
 ```json
 {
@@ -151,7 +137,7 @@ npm install -D @playwright/test @types/node @vitejs/plugin-vue @vue/test-utils j
 
 预期：生成 `package-lock.json`，`npm ls --depth=0` 退出码为 0。
 
-- [ ] **步骤 3：创建严格 TypeScript、Vite 和 Vitest 配置**
+- [ ] **步骤 2：创建严格 TypeScript、Vite 和 Vitest 配置**
 
 ```json
 // tsconfig.json
@@ -195,16 +181,29 @@ import { defineConfig } from 'vitest/config'
 export default defineConfig({ test: { include: ['tests/**/*.test.ts'], restoreMocks: true, clearMocks: true } })
 ```
 
-- [ ] **步骤 4：运行测试确认当前因缺少配置模块而失败**
+- [ ] **步骤 3：创建测试框架烟雾测试**
 
-运行：`npm test -- tests/server/config.test.ts`
+```ts
+// tests/setup.test.ts
+import { describe, expect, it } from 'vitest'
 
-预期：FAIL，报错无法解析 `src/server/config.ts`。
+describe('test harness', () => {
+  it('runs under a supported Node.js version', () => {
+    expect(Number(process.versions.node.split('.')[0])).toBeGreaterThanOrEqual(22)
+  })
+})
+```
+
+- [ ] **步骤 4：运行烟雾测试和依赖检查**
+
+运行：`npm test -- tests/setup.test.ts && npm ls --depth=0`
+
+预期：1 个测试 PASS，依赖树检查退出码为 0。
 
 - [ ] **步骤 5：提交工程骨架**
 
 ```bash
-git add package.json package-lock.json tsconfig.json vite.config.ts vitest.config.ts .gitignore tests/server/config.test.ts
+git add package.json package-lock.json tsconfig.json vite.config.ts vitest.config.ts .gitignore tests/setup.test.ts
 git commit -m "chore: initialize TypeScript application"
 ```
 
@@ -218,7 +217,19 @@ git commit -m "chore: initialize TypeScript application"
 - 测试：`tests/server/config.test.ts`
 - 测试：`tests/server/amount.test.ts`
 
-- [ ] **步骤 1：扩展配置与金额失败测试**
+- [ ] **步骤 1：编写配置与金额失败测试**
+
+```ts
+// tests/server/config.test.ts
+import { describe, expect, it } from 'vitest'
+import { loadConfig } from '../../src/server/config.js'
+
+describe('loadConfig', () => {
+  it('rejects missing production secrets', () => {
+    expect(() => loadConfig({ NODE_ENV: 'production' })).toThrow(/SUB2API_BASE_URL/)
+  })
+})
+```
 
 ```ts
 // tests/server/amount.test.ts
