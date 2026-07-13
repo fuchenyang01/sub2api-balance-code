@@ -252,9 +252,9 @@ describe('API client', () => {
     expect((error as Error).message).not.toContain(body)
   })
 
-  it('parses a stable API error without retaining unknown response fields', async () => {
+  it('maps a stable API error code to local copy without retaining response messages', async () => {
     const client = createApiClient(vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      error: { code: 'RATE_LIMITED', message: '请求过于频繁', request_id: 'request-7' },
+      error: { code: 'RATE_LIMITED', message: 'Too many requests from upstream', request_id: 'request-7' },
       leaked: 'RAW-SECRET',
     }), { status: 429, headers: { 'Content-Type': 'application/json' } })))
 
@@ -262,8 +262,9 @@ describe('API client', () => {
 
     expect(error).toBeInstanceOf(ApiClientError)
     expect(error).toMatchObject({
-      code: 'RATE_LIMITED', status: 429, requestId: 'request-7', message: '请求过于频繁',
+      code: 'RATE_LIMITED', status: 429, requestId: 'request-7', message: '请求过于频繁，请稍后重试',
     })
+    expect((error as Error).message).not.toContain('Too many requests from upstream')
     expect(error).not.toHaveProperty('leaked')
   })
 })

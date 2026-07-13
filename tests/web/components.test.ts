@@ -1,8 +1,12 @@
 // @vitest-environment jsdom
 
 import { mount } from '@vue/test-utils'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { defineComponent, nextTick, ref } from 'vue'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+const styles = readFileSync(join(process.cwd(), 'src/web/styles.css'), 'utf8')
 
 const appController = vi.hoisted((): {
   session: string
@@ -44,6 +48,12 @@ import AccountBar from '../../src/web/components/AccountBar.vue'
 import ConfirmDialog from '../../src/web/components/ConfirmDialog.vue'
 import ConversionForm from '../../src/web/components/ConversionForm.vue'
 import ConversionResult from '../../src/web/components/ConversionResult.vue'
+
+describe('responsive stylesheet', () => {
+  it('does not force body wider than a narrow iframe viewport', () => {
+    expect(styles).not.toMatch(/body\s*\{[^}]*min-width\s*:/s)
+  })
+})
 
 describe('ConversionForm', () => {
   it.each(['', '0', '10.00000001', '1.123456789', '1e2'])(

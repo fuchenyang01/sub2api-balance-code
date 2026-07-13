@@ -57,7 +57,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
 }
 
-function parseStableError(value: unknown): { code: ErrorCode; message: string; requestId: string } | null {
+function parseStableError(value: unknown): { code: ErrorCode; requestId: string } | null {
   if (!isRecord(value) || !isRecord(value.error)) return null
   const { code, message, request_id: requestId } = value.error
   if (
@@ -69,7 +69,7 @@ function parseStableError(value: unknown): { code: ErrorCode; message: string; r
     || typeof requestId !== 'string'
     || requestId.length > 128
   ) return null
-  return { code: code as ErrorCode, message, requestId }
+  return { code: code as ErrorCode, requestId }
 }
 
 async function parseJson(response: Response): Promise<unknown> {
@@ -95,7 +95,7 @@ export function createApiClient(fetcher: Fetcher = globalThis.fetch.bind(globalT
 
     const stable = parseStableError(parsed)
     if (stable !== null) {
-      throw new ApiClientError(stable.code, response.status, stable.requestId, stable.message)
+      throw new ApiClientError(stable.code, response.status, stable.requestId)
     }
     throw new ApiClientError('UPSTREAM_UNAVAILABLE', response.status, '')
   }
