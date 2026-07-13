@@ -1,3 +1,6 @@
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { Writable } from 'node:stream'
 
 import type { FastifyInstance } from 'fastify'
@@ -7,6 +10,7 @@ import { buildApp, type AppDependencies } from '../../src/server/app.js'
 import type { AppConfig } from '../../src/server/config.js'
 import type { ExecuteResponse, PrepareResponse } from '../../src/shared/contracts.js'
 import { AppError } from '../../src/server/errors.js'
+import { redactionPaths } from '../../src/server/security/redaction.js'
 import { SecretsService } from '../../src/server/security/secrets.js'
 import { UpstreamError } from '../../src/server/sub2api/http.js'
 import type { Profile } from '../../src/server/sub2api/types.js'
@@ -108,6 +112,7 @@ function secrets(now: () => Date = () => new Date()): SecretsService {
 }
 
 const apps: FastifyInstance[] = []
+const temporaryRoots: string[] = []
 
 async function setup(overrides: Partial<AppDependencies> = {}) {
   const users = new FakeUsers()
@@ -165,6 +170,7 @@ function expectClearedSessionCookie(value: string | string[] | undefined): void 
 
 afterEach(async () => {
   await Promise.all(apps.splice(0).map((app) => app.close()))
+  await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })
 
 describe('session routes', () => {
@@ -531,7 +537,19 @@ describe('protected conversions', () => {
 
   it.each([
     [new AppError('AMOUNT_EXCEEDS_BALANCE', 409, 'leaked SECRET-JWT'), 'AMOUNT_EXCEEDS_BALANCE', 409],
-    [new Error('leaked SECRET-JWT operation-secret-token REDEEM-SECRET-CODE'), 'UPSTREAM_UNAVAILABLE', 502],
+    [
+      Object.assign(
+        new Error(
+          'leaked SECRET-JWT ADMIN-SECRET-KEY SESSION-SECRET-TOKEN operation-secret-token REDEEM-SECRET-CODE',
+        ),
+        {
+          cause: new Error('UPSTREAM-CAUSE-SECRET'),
+          body: 'UPSTREAM-BODY-SECRET',
+        },
+      ),
+      'UPSTREAM_UNAVAILABLE',
+      502,
+    ],
   ] as const)('serializes application and unknown failures safely', async (error, code, status) => {
     const { app, conversions } = await setup()
     const cookie = await cookieFor(app)
@@ -545,18 +563,56 @@ describe('protected conversions', () => {
 
     expect(response.statusCode).toBe(status)
     stableError(response, code)
-    expect(response.body).not.toMatch(/SECRET-JWT|operation-secret-token|REDEEM-SECRET-CODE/)
+    expect(response.body).not.toMatch(
+      /SECRET-JWT|ADMIN-SECRET-KEY|SESSION-SECRET-TOKEN|operation-secret-token|REDEEM-SECRET-CODE|UPSTREAM-CAUSE-SECRET|UPSTREAM-BODY-SECRET|stack|cause/,
+    )
   })
 })
 
 describe('security headers, rate limits, and logging', () => {
-  it('sets frame, referrer, and MIME-sniffing protections', async () => {
+  it('sets exact frame, referrer, and MIME-sniffing protections without a wildcard', async () => {
     const { app } = await setup()
     const response = await app.inject({ method: 'GET', url: '/healthz' })
 
-    expect(response.headers['content-security-policy']).toContain("frame-ancestors 'self' https://sub2api.example.test")
+    const csp = response.headers['content-security-policy']
+    expect(csp).toBeTypeOf('string')
+    const frameAncestors = (csp as string)
+      .split(';')
+      .map((directive) => directive.trim())
+      .find((directive) => directive.startsWith('frame-ancestors '))
+    expect(frameAncestors).toBe(`frame-ancestors 'self' ${sub2apiOrigin}`)
+    expect(frameAncestors).not.toContain('*')
     expect(response.headers['referrer-policy']).toBe('no-referrer')
     expect(response.headers['x-content-type-options']).toBe('nosniff')
+  })
+
+  it('always emits a Secure session cookie in production', async () => {
+    const users = new FakeUsers()
+    const app = buildApp({ ...config, nodeEnv: 'production' }, {
+      users,
+      conversions: new FakeConversions(),
+      secrets: secrets(),
+    })
+    apps.push(app)
+    await app.ready()
+
+    const response = await exchange(app)
+
+    expect(response.statusCode).toBe(200)
+    expect(response.headers['set-cookie']).toMatch(/; Secure(?:;|$)/i)
+  })
+
+  it('declares every credential-bearing logger path required by the server contract', () => {
+    expect(redactionPaths).toEqual(expect.arrayContaining([
+      'req.headers.authorization',
+      'req.headers.cookie',
+      'req.headers["x-api-key"]',
+      'req.query.token',
+      'req.body.token',
+      'req.body.operation_token',
+      'res.body.code',
+      'config.sub2apiAdminApiKey',
+    ]))
   })
 
   it('rate limits exchange independently from prepare and execute', async () => {
@@ -727,7 +783,7 @@ describe('security headers, rate limits, and logging', () => {
 
     await app.inject({
       method: 'GET',
-      url: '/healthz?token=QUERY-SECRET',
+      url: '/healthz?token=QUERY-SECRET&user_id=PRIVATE-USER-ID',
       headers: { authorization: 'Bearer SECRET-JWT', cookie: 'redeem_session=SECRET-COOKIE' },
     })
     app.log.info({
@@ -737,8 +793,18 @@ describe('security headers, rate limits, and logging', () => {
         code: 'OBJECT-SECRET-CODE',
       },
       headers: { 'x-api-key': 'X-API-SECRET' },
+      session: { userJwt: 'SESSION-TOKEN-SECRET' },
       sub2apiAdminApiKey: 'ADMIN-SECRET',
+      config: { sub2apiAdminApiKey: 'NESTED-ADMIN-SECRET' },
     }, 'redaction probe')
+    const loggedError = Object.assign(
+      new Error('UPSTREAM-BODY-SECRET SECRET-STACK-JWT'),
+      {
+        cause: new Error('SECRET-CAUSE-OPERATION-TOKEN'),
+        body: 'SECRET-UPSTREAM-BODY',
+      },
+    )
+    app.log.error({ err: loggedError }, 'safe upstream failure')
 
     const sessionCookie = await cookieFor(app)
     await app.inject({
@@ -751,8 +817,74 @@ describe('security headers, rate limits, and logging', () => {
 
     expect(output.length).toBeGreaterThan(0)
     expect(output).toContain('[REDACTED]')
-    expect(output).not.toMatch(
-      /QUERY-SECRET|SECRET-JWT|SECRET-COOKIE|BODY-SECRET-OP|OBJECT-SECRET-CODE|X-API-SECRET|ADMIN-SECRET|EXECUTE-SECRET-OP|REDEEM-SECRET-CODE/,
+    const records = output.trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>)
+    const incoming = records.find((record) => record.msg === 'incoming request')
+    const completed = records.find((record) =>
+      record.msg === 'request completed' &&
+      (record.res as { statusCode?: number } | undefined)?.statusCode === 200,
     )
+    expect(incoming).toMatchObject({
+      req: { method: 'GET', pathname: '/healthz' },
+      reqId: expect.any(String),
+    })
+    expect(incoming?.req).toEqual({ method: 'GET', pathname: '/healthz' })
+    expect(completed).toMatchObject({
+      res: { statusCode: 200 },
+      reqId: expect.any(String),
+      responseTime: expect.any(Number),
+    })
+    expect(completed?.res).toEqual({ statusCode: 200 })
+    expect(output).not.toMatch(
+      /QUERY-SECRET|PRIVATE-USER-ID|SECRET-JWT|SECRET-COOKIE|SESSION-TOKEN-SECRET|BODY-SECRET-OP|OBJECT-SECRET-CODE|X-API-SECRET|ADMIN-SECRET|EXECUTE-SECRET-OP|REDEEM-SECRET-CODE|UPSTREAM-BODY-SECRET|SECRET-STACK-JWT|SECRET-CAUSE-OPERATION-TOKEN|SECRET-UPSTREAM-BODY/,
+    )
+  })
+})
+
+describe('production web hosting', () => {
+  it('serves the built SPA and assets without swallowing API or health routes', async () => {
+    const webRoot = await mkdtemp(join(tmpdir(), 'balance-code-web-'))
+    temporaryRoots.push(webRoot)
+    await mkdir(join(webRoot, 'assets'))
+    await writeFile(
+      join(webRoot, 'index.html'),
+      '<!doctype html><html><body><div id="app">production fixture</div></body></html>',
+    )
+    await writeFile(join(webRoot, 'assets', 'app-a1b2c3.js'), 'globalThis.fixtureLoaded=true')
+
+    const dependencies = {
+      users: new FakeUsers(),
+      conversions: new FakeConversions(),
+      secrets: secrets(),
+      webRoot,
+    }
+    const app = buildApp({ ...config, nodeEnv: 'production' }, dependencies)
+    apps.push(app)
+    await app.ready()
+
+    const root = await app.inject({ method: 'GET', url: '/' })
+    expect(root.statusCode).toBe(200)
+    expect(root.headers['content-type']).toMatch(/^text\/html/)
+    expect(root.body).toContain('production fixture')
+
+    const asset = await app.inject({ method: 'GET', url: '/assets/app-a1b2c3.js' })
+    expect(asset.statusCode).toBe(200)
+    expect(asset.headers['content-type']).toMatch(/^(?:application|text)\/javascript/)
+    expect(asset.body).toBe('globalThis.fixtureLoaded=true')
+
+    const historyFallback = await app.inject({ method: 'GET', url: '/history' })
+    expect(historyFallback.statusCode).toBe(200)
+    expect(historyFallback.headers['content-type']).toMatch(/^text\/html/)
+    expect(historyFallback.body).toContain('production fixture')
+
+    const unknownApi = await app.inject({ method: 'GET', url: '/api/unknown?token=API-SECRET' })
+    expect(unknownApi.statusCode).toBe(404)
+    stableError(unknownApi, 'SESSION_INVALID')
+    expect(unknownApi.headers['content-type']).toMatch(/^application\/json/)
+    expect(unknownApi.body).not.toMatch(/production fixture|API-SECRET/)
+
+    const health = await app.inject({ method: 'GET', url: '/healthz?token=HEALTH-SECRET' })
+    expect(health.statusCode).toBe(200)
+    expect(health.json()).toEqual({ status: 'ok' })
+    expect(health.body).not.toMatch(/production fixture|HEALTH-SECRET|origin|api|secret/i)
   })
 })

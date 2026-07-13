@@ -5,14 +5,23 @@ import type { FastifyServerOptions } from 'fastify'
 interface RequestLike {
   method?: string
   url?: string
-  headers?: Record<string, string | string[] | undefined>
+}
+
+interface ResponseLike {
+  statusCode?: number
+}
+
+interface ErrorLike {
+  name?: string
 }
 
 type FastifyLoggerOptions = Exclude<FastifyServerOptions['logger'], boolean | undefined>
 
 export type SafeLoggerOptions = FastifyLoggerOptions & {
   serializers: {
-    req(request: RequestLike): { method: string | undefined; url: string }
+    req(request: RequestLike): { method: string | undefined; pathname: string }
+    res(response: ResponseLike): { statusCode: number | undefined }
+    err(error: ErrorLike): { type: string }
   }
   stream?: Writable
 }
@@ -21,6 +30,9 @@ export const redactionPaths = [
   'req.headers.authorization',
   'req.headers.cookie',
   'req.headers["x-api-key"]',
+  'req.query.token',
+  'req.body.token',
+  'req.body.operation_token',
   'request.headers.authorization',
   'request.headers.cookie',
   'request.headers["x-api-key"]',
@@ -34,6 +46,7 @@ export const redactionPaths = [
   'userJwt',
   'session.userJwt',
   'sub2apiAdminApiKey',
+  'config.sub2apiAdminApiKey',
   'adminApiKey',
   'code',
   '*.code',
@@ -59,7 +72,9 @@ export function createLoggerOptions(
     level,
     redact: { paths: [...redactionPaths], censor: '[REDACTED]' },
     serializers: {
-      req: (request) => ({ method: request.method, url: pathname(request.url) }),
+      req: (request) => ({ method: request.method, pathname: pathname(request.url) }),
+      res: (response) => ({ statusCode: response.statusCode }),
+      err: (error) => ({ type: error.name ?? 'Error' }),
     },
     ...(stream === undefined ? {} : { stream }),
   } as SafeLoggerOptions

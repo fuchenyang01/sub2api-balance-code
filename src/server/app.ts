@@ -1,8 +1,11 @@
+import { extname, resolve } from 'node:path'
 import type { Writable } from 'node:stream'
+import { fileURLToPath } from 'node:url'
 
 import cookie from '@fastify/cookie'
 import helmet from '@fastify/helmet'
 import rateLimit from '@fastify/rate-limit'
+import fastifyStatic from '@fastify/static'
 import Fastify, { type FastifyError, type FastifyInstance, type FastifyRequest } from 'fastify'
 
 import type { ApiErrorBody, ErrorCode } from '../shared/contracts.js'
@@ -32,6 +35,7 @@ export interface AppDependencies {
   secrets: AppSecrets
   conversions: ConversionOperations
   loggerStream: Writable
+  webRoot: string
 }
 
 const safeMessages: Record<ErrorCode, string> = {
@@ -68,8 +72,33 @@ function isValidationError(error: FastifyError): boolean {
   )
 }
 
-function installErrorHandler(app: FastifyInstance, config: Readonly<AppConfig>): void {
+function requestPathname(request: FastifyRequest): string {
+  try {
+    return new URL(request.url, 'http://localhost').pathname
+  } catch {
+    return '/'
+  }
+}
+
+function isSpaNavigation(request: FastifyRequest): boolean {
+  if (request.method !== 'GET' && request.method !== 'HEAD') return false
+  const path = requestPathname(request)
+  if (path === '/api' || path.startsWith('/api/')) return false
+  if (path === '/healthz' || path.startsWith('/healthz/')) return false
+  return extname(path) === ''
+}
+
+function installErrorHandler(
+  app: FastifyInstance,
+  config: Readonly<AppConfig>,
+  serveWeb: boolean,
+): void {
   app.setNotFoundHandler((request, reply) => {
+    if (serveWeb && isSpaNavigation(request)) {
+      return reply
+        .type('text/html; charset=utf-8')
+        .sendFile('index.html', { maxAge: 0, immutable: false })
+    }
     const body: ApiErrorBody = {
       error: {
         code: 'SESSION_INVALID',
@@ -123,7 +152,6 @@ export function buildApp(
     },
     logger: createLoggerOptions(config.logLevel, optionalDependencies.loggerStream),
   })
-  installErrorHandler(app, config)
   const allowedOrigins = new Set([config.appOrigin, config.sub2apiOrigin])
   app.addHook('onRequest', async (request) => {
     enforceWriteOrigin(request, allowedOrigins)
@@ -148,6 +176,9 @@ export function buildApp(
     )
   const conversions =
     optionalDependencies.conversions ?? new ConversionService(users, admin, secrets)
+  const serveWeb = config.nodeEnv === 'production'
+  const webRoot =
+    optionalDependencies.webRoot ?? resolve(fileURLToPath(new URL('../web', import.meta.url)))
 
   void app.register(async (routes) => {
     await routes.register(cookie)
@@ -160,6 +191,14 @@ export function buildApp(
       referrerPolicy: { policy: 'no-referrer' },
     })
     await routes.register(rateLimit, { global: false })
+    if (serveWeb) {
+      await routes.register(fastifyStatic, {
+        root: webRoot,
+        wildcard: false,
+      })
+    }
+
+    installErrorHandler(routes, config, serveWeb)
 
     const sessionDependencies = { config, users, secrets }
     const sessions = new SessionReader(sessionDependencies)
