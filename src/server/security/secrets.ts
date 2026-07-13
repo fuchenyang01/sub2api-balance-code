@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto'
 
 import { CompactEncrypt, SignJWT, compactDecrypt, errors, jwtVerify } from 'jose'
+import type { JWTPayload } from 'jose'
 
-import { parseAmount } from '../amount.js'
+import { normalizeAmount } from '../amount.js'
 import { AppError } from '../errors.js'
 
 const encoder = new TextEncoder()
@@ -58,9 +59,17 @@ function isCanonicalIsoDate(value: unknown): value is string {
 function isCanonicalAmount(value: unknown): value is string {
   if (typeof value !== 'string') return false
   try {
-    return parseAmount(value).toString() === value
+    return normalizeAmount(value) === value
   } catch {
     return false
+  }
+}
+
+function numericDateToIso(value: number): string | undefined {
+  try {
+    return new Date(value * 1000).toISOString()
+  } catch {
+    return undefined
   }
 }
 
@@ -80,6 +89,53 @@ function expiredOperation(): AppError {
   return new AppError('OPERATION_TOKEN_EXPIRED', 401, '操作令牌已过期')
 }
 
+function internalSecurityError(): Error {
+  return new Error('安全操作失败')
+}
+
+function validateOperationPayload(
+  payload: JWTPayload,
+  expectedUserId: number,
+): OperationPayload {
+  if (
+    payload.version !== 1 ||
+    typeof payload.jti !== 'string' ||
+    !uuidV4Pattern.test(payload.jti) ||
+    typeof payload.sub !== 'string' ||
+    typeof payload.iat !== 'number' ||
+    !Number.isSafeInteger(payload.iat) ||
+    typeof payload.exp !== 'number' ||
+    !Number.isSafeInteger(payload.exp) ||
+    payload.exp <= payload.iat ||
+    !isCanonicalAmount(payload.amount)
+  ) {
+    throw invalidOperation()
+  }
+
+  const userId = Number(payload.sub)
+  const issuedAt = numericDateToIso(payload.iat)
+  const expiresAt = numericDateToIso(payload.exp)
+  if (
+    !isPositiveInteger(userId) ||
+    String(userId) !== payload.sub ||
+    !isPositiveInteger(expectedUserId) ||
+    userId !== expectedUserId ||
+    issuedAt === undefined ||
+    expiresAt === undefined
+  ) {
+    throw invalidOperation()
+  }
+
+  return {
+    version: 1,
+    operationId: payload.jti,
+    userId,
+    amount: payload.amount,
+    issuedAt,
+    expiresAt,
+  }
+}
+
 export class SecretsService {
   readonly #sessionKey: Uint8Array
   readonly #operationKey: Uint8Array
@@ -89,11 +145,28 @@ export class SecretsService {
   constructor(options: SecretsServiceOptions) {
     this.#sessionKey = keyFromSecret(options.sessionSecret)
     this.#operationKey = keyFromSecret(options.operationSigningSecret)
-    if (!Number.isSafeInteger(options.operationTtlMinutes) || options.operationTtlMinutes <= 0) {
+    const operationTtlSeconds = options.operationTtlMinutes * 60
+    if (
+      !Number.isSafeInteger(options.operationTtlMinutes) ||
+      options.operationTtlMinutes <= 0 ||
+      !Number.isSafeInteger(operationTtlSeconds)
+    ) {
       throw new TypeError('Operation TTL must be a positive integer')
     }
-    this.#operationTtlSeconds = options.operationTtlMinutes * 60
+    this.#operationTtlSeconds = operationTtlSeconds
     this.#now = options.now ?? (() => new Date())
+  }
+
+  #currentDate(): Date {
+    try {
+      const value = this.#now()
+      if (!(value instanceof Date) || !Number.isFinite(value.getTime())) {
+        throw internalSecurityError()
+      }
+      return new Date(value.getTime())
+    } catch {
+      throw internalSecurityError()
+    }
   }
 
   async sealSession(input: {
@@ -106,9 +179,11 @@ export class SecretsService {
       input.userJwt.length === 0 ||
       !isPositiveInteger(input.userId) ||
       !(input.expiresAt instanceof Date) ||
-      !Number.isFinite(input.expiresAt.getTime()) ||
-      input.expiresAt.getTime() <= this.#now().getTime()
+      !Number.isFinite(input.expiresAt.getTime())
     ) {
+      throw invalidSession()
+    }
+    if (input.expiresAt.getTime() <= this.#currentDate().getTime()) {
       throw invalidSession()
     }
 
@@ -124,11 +199,12 @@ export class SecretsService {
         .setProtectedHeader({ alg: 'dir', enc: 'A256GCM' })
         .encrypt(this.#sessionKey)
     } catch {
-      throw invalidSession()
+      throw internalSecurityError()
     }
   }
 
   async unsealSession(token: string): Promise<SessionPayload> {
+    const currentDate = this.#currentDate()
     try {
       const { plaintext, protectedHeader } = await compactDecrypt(token, this.#sessionKey, {
         keyManagementAlgorithms: ['dir'],
@@ -150,7 +226,7 @@ export class SecretsService {
       ) {
         throw invalidSession()
       }
-      if (Date.parse(payload.expiresAt) <= this.#now().getTime()) {
+      if (Date.parse(payload.expiresAt) <= currentDate.getTime()) {
         throw expiredSession()
       }
 
@@ -175,7 +251,7 @@ export class SecretsService {
       throw invalidOperation()
     }
 
-    const issuedAtSeconds = Math.floor(this.#now().getTime() / 1000)
+    const issuedAtSeconds = Math.floor(this.#currentDate().getTime() / 1000)
     const expiresAtSeconds = issuedAtSeconds + this.#operationTtlSeconds
     try {
       const token = await new SignJWT({ version: 1, amount: input.amount })
@@ -193,55 +269,26 @@ export class SecretsService {
         expiresAt: new Date(expiresAtSeconds * 1000).toISOString(),
       }
     } catch {
-      throw invalidOperation()
+      throw internalSecurityError()
     }
   }
 
   async verifyOperation(token: string, expectedUserId: number): Promise<OperationPayload> {
+    const currentDate = this.#currentDate()
     try {
-      const { payload, protectedHeader } = await jwtVerify(token, this.#operationKey, {
+      const { payload } = await jwtVerify(token, this.#operationKey, {
         algorithms: ['HS256'],
         issuer: operationIssuer,
         audience: operationAudience,
-        currentDate: this.#now(),
+        currentDate,
         requiredClaims: ['iat', 'exp', 'sub', 'jti'],
       })
-      if (
-        protectedHeader.alg !== 'HS256' ||
-        payload.version !== 1 ||
-        typeof payload.jti !== 'string' ||
-        !uuidV4Pattern.test(payload.jti) ||
-        typeof payload.sub !== 'string' ||
-        typeof payload.iat !== 'number' ||
-        !Number.isSafeInteger(payload.iat) ||
-        typeof payload.exp !== 'number' ||
-        !Number.isSafeInteger(payload.exp) ||
-        payload.exp <= payload.iat ||
-        !isCanonicalAmount(payload.amount)
-      ) {
-        throw invalidOperation()
-      }
-
-      const userId = Number(payload.sub)
-      if (
-        !isPositiveInteger(userId) ||
-        String(userId) !== payload.sub ||
-        !isPositiveInteger(expectedUserId) ||
-        userId !== expectedUserId
-      ) {
-        throw invalidOperation()
-      }
-
-      return {
-        version: 1,
-        operationId: payload.jti,
-        userId,
-        amount: payload.amount,
-        issuedAt: new Date(payload.iat * 1000).toISOString(),
-        expiresAt: new Date(payload.exp * 1000).toISOString(),
-      }
+      return validateOperationPayload(payload, expectedUserId)
     } catch (error) {
-      if (error instanceof errors.JWTExpired) throw expiredOperation()
+      if (error instanceof errors.JWTExpired) {
+        validateOperationPayload(error.payload, expectedUserId)
+        throw expiredOperation()
+      }
       if (error instanceof AppError) throw error
       throw invalidOperation()
     }

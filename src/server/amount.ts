@@ -17,6 +17,10 @@ export function parseAmount(input: string): Decimal {
   return value
 }
 
+export function normalizeAmount(input: string): string {
+  return parseAmount(input).toFixed()
+}
+
 export function amountToUpstreamNumber(value: Decimal): number {
   const output = value.toNumber()
   if (!Number.isFinite(output) || !new Decimal(output).equals(value)) {

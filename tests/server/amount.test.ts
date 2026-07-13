@@ -1,7 +1,7 @@
 import { Decimal } from 'decimal.js'
 import { describe, expect, it } from 'vitest'
 
-import { amountToUpstreamNumber, parseAmount } from '../../src/server/amount.js'
+import { amountToUpstreamNumber, normalizeAmount, parseAmount } from '../../src/server/amount.js'
 import { AppError } from '../../src/server/errors.js'
 
 function expectInvalidAmount(action: () => unknown): void {
@@ -57,5 +57,20 @@ describe('amountToUpstreamNumber', () => {
 
   it.each(['9007199254740993', '0.100000000000000005'])('rejects lossy conversion of %s', (input) => {
     expectInvalidAmount(() => amountToUpstreamNumber(new Decimal(input)))
+  })
+})
+
+describe('normalizeAmount', () => {
+  it.each([
+    ['001.23000000', '1.23'],
+    ['0.0000001', '0.0000001'],
+    ['0.00000001', '0.00000001'],
+    ['1000000000000000000000', '1000000000000000000000'],
+  ])('normalizes %s to plain decimal %s', (input, expected) => {
+    expect(normalizeAmount(input)).toBe(expected)
+  })
+
+  it.each(['0', '1e3', '0.123456789'])('rejects invalid amount %j', (input) => {
+    expectInvalidAmount(() => normalizeAmount(input))
   })
 })

@@ -63,6 +63,22 @@ async function expectAppError(
   }
 }
 
+async function expectSafeInternalError(action: () => Promise<unknown>): Promise<void> {
+  let error: unknown
+  try {
+    await action()
+  } catch (caught) {
+    error = caught
+  }
+  expect(error).toBeInstanceOf(Error)
+  expect(error).not.toBeInstanceOf(AppError)
+  const exposed = `${(error as Error).message} ${JSON.stringify(error)} ${String((error as Error).cause)}`
+  expect(exposed).not.toContain(sessionSecret)
+  expect(exposed).not.toContain(operationSecret)
+  expect(exposed).not.toContain(userJwt)
+  expect((error as Error).cause).toBeUndefined()
+}
+
 async function makeSessionToken(
   payload: unknown,
   header: { alg: string; enc: string } = { alg: 'dir', enc: 'A256GCM' },
@@ -196,6 +212,15 @@ describe('SecretsService operation tokens', () => {
     })
   })
 
+  it.each(['0.0000001', '0.00000001', '1000000000000000000000'])(
+    'signs and verifies canonical plain decimal amount %s',
+    async (amount) => {
+      const signed = await service().signOperation({ operationId, userId: 42, amount })
+
+      await expect(service().verifyOperation(signed.token, 42)).resolves.toMatchObject({ amount })
+    },
+  )
+
   it('binds verification to the expected user', async () => {
     const { token } = await service().signOperation({ operationId, userId: 42, amount: '1.23' })
     await expectAppError(() => service().verifyOperation(token, 7), 'OPERATION_TOKEN_INVALID')
@@ -206,6 +231,35 @@ describe('SecretsService operation tokens', () => {
     const { token } = await signer.signOperation({ operationId, userId: 42, amount: '1.23' })
 
     await expectAppError(() => service().verifyOperation(token, 42), 'OPERATION_TOKEN_EXPIRED')
+  })
+
+  it('does not report an expired token for the wrong expected user', async () => {
+    const signer = service({ now: () => new Date('2026-07-13T06:00:00.000Z') })
+    const { token } = await signer.signOperation({ operationId, userId: 42, amount: '1.23' })
+
+    await expectAppError(() => service().verifyOperation(token, 7), 'OPERATION_TOKEN_INVALID')
+  })
+
+  it.each([
+    ['amount', { amount: '001.00' }],
+    ['version', { version: 2 }],
+    ['jti', { jti: 'not-a-uuid' }],
+    ['subject', { sub: '0' }],
+    ['time order', { iat: 1_783_926_000, exp: 1_783_922_400 }],
+  ])('rejects expired tokens with invalid %s claims', async (_name, override) => {
+    const token = await makeOperationToken({
+      iss: 'sub2api-balance-code',
+      aud: 'balance-conversion',
+      sub: '42',
+      jti: operationId,
+      iat: 1_783_922_400,
+      exp: 1_783_926_000,
+      version: 1,
+      amount: '1.23',
+      ...override,
+    })
+
+    await expectAppError(() => service().verifyOperation(token, 42), 'OPERATION_TOKEN_INVALID')
   })
 
   it('rejects a token signed with a different operation secret', async () => {
@@ -248,8 +302,44 @@ describe('SecretsService operation tokens', () => {
     { operationId, userId: 1.5, amount: '1.23' },
     { operationId, userId: 42, amount: '001.00' },
     { operationId, userId: 42, amount: '1.00' },
+    { operationId, userId: 42, amount: '001.23000000' },
+    { operationId, userId: 42, amount: '1.23000000' },
   ])('rejects invalid operation input %#', async (input) => {
     await expectAppError(() => service().signOperation(input), 'OPERATION_TOKEN_INVALID')
+  })
+
+  it('rejects a TTL whose seconds overflow the safe integer range', () => {
+    expect(() => service({ operationTtlMinutes: Number.MAX_SAFE_INTEGER })).toThrow(TypeError)
+  })
+
+  it('fails safely when the injected clock is invalid for every public operation', async () => {
+    const sessionToken = await service().sealSession({
+      userJwt,
+      userId: 42,
+      expiresAt: new Date('2026-07-13T09:00:00.000Z'),
+    })
+    const operationToken = (await service().signOperation({ operationId, userId: 42, amount: '1.23' })).token
+    const invalidClock = service({ now: () => new Date(Number.NaN) })
+
+    const actions = [
+      () => invalidClock.sealSession({ userJwt, userId: 42, expiresAt: new Date('2026-07-13T09:00:00.000Z') }),
+      () => invalidClock.unsealSession(sessionToken),
+      () => invalidClock.signOperation({ operationId, userId: 42, amount: '1.23' }),
+      () => invalidClock.verifyOperation(operationToken, 42),
+    ]
+    for (const action of actions) await expectSafeInternalError(action)
+  })
+
+  it('does not expose an error thrown by the injected clock', async () => {
+    const subject = service({
+      now: () => {
+        throw new Error(operationSecret)
+      },
+    })
+
+    await expectSafeInternalError(() =>
+      subject.signOperation({ operationId, userId: 42, amount: '1.23' }),
+    )
   })
 
   it('does not expose tokens, JWTs, secrets, or JOSE causes in errors', async () => {
