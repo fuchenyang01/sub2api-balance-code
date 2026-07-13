@@ -47,11 +47,15 @@ interface UpstreamRequestOptions<T> {
   sensitiveValues?: readonly string[]
 }
 
-const envelopeSchema = z.object({
+const errorEnvelopeSchema = z.object({
   code: z.number(),
   message: z.string().optional(),
   reason: z.string().optional(),
   data: z.unknown().optional(),
+})
+
+const successEnvelopeSchema = errorEnvelopeSchema.extend({
+  message: z.string(),
 })
 
 const MAX_UPSTREAM_TEXT_LENGTH = 1_024
@@ -120,6 +124,18 @@ function invalidResponse(status: number, message: string): UpstreamError {
   return new UpstreamError('invalid-response', message, { status })
 }
 
+function transportFailure(error: unknown): UpstreamError {
+  const name = error instanceof Error ? error.name : ''
+  if (name === 'TimeoutError' || name === 'AbortError') {
+    return new UpstreamError('timeout', 'Upstream request timed out', {
+      cause: new Error('Upstream transport timeout'),
+    })
+  }
+  return new UpstreamError('network', 'Upstream network request failed', {
+    cause: new Error('Upstream transport failure'),
+  })
+}
+
 export async function requestUpstream<T>(options: UpstreamRequestOptions<T>): Promise<T> {
   const fetchImpl = options.fetchImpl ?? globalThis.fetch
   const sensitiveValues = options.sensitiveValues ?? []
@@ -128,36 +144,24 @@ export async function requestUpstream<T>(options: UpstreamRequestOptions<T>): Pr
   try {
     response = await fetchImpl(options.url, {
       ...options.init,
+      redirect: 'error',
       signal: AbortSignal.timeout(options.timeoutMs),
     })
   } catch (error) {
-    const name = error instanceof Error ? error.name : ''
-    if (name === 'TimeoutError' || name === 'AbortError') {
-      throw new UpstreamError('timeout', 'Upstream request timed out', {
-        cause: new Error('Upstream transport timeout'),
-      })
-    }
-    throw new UpstreamError('network', 'Upstream network request failed', {
-      cause: new Error('Upstream transport failure'),
-    })
+    throw transportFailure(error)
   }
 
   let responseText: string
   try {
     responseText = await readLimitedText(response)
-  } catch {
-    if (!response.ok) {
-      throw new UpstreamError(errorKind(response.status, undefined, ''), 'Upstream HTTP failure', {
-        status: response.status,
-      })
-    }
-    throw invalidResponse(response.status, 'Upstream response body could not be read')
+  } catch (error) {
+    throw transportFailure(error)
   }
 
   const rawEnvelope = parseJson(responseText)
-  const parsedEnvelope = envelopeSchema.safeParse(rawEnvelope)
+  const parsedErrorEnvelope = errorEnvelopeSchema.safeParse(rawEnvelope)
   if (!response.ok) {
-    const envelope = parsedEnvelope.success ? parsedEnvelope.data : undefined
+    const envelope = parsedErrorEnvelope.success ? parsedErrorEnvelope.data : undefined
     const rawMessage = envelope?.message ?? 'Upstream HTTP request failed'
     const rawReason = envelope?.reason
     const message = safeText(rawMessage, sensitiveValues)
@@ -171,11 +175,12 @@ export async function requestUpstream<T>(options: UpstreamRequestOptions<T>): Pr
   if (rawEnvelope === undefined) {
     throw invalidResponse(response.status, 'Upstream response was not valid JSON')
   }
-  if (!parsedEnvelope.success) {
+  const parsedSuccessEnvelope = successEnvelopeSchema.safeParse(rawEnvelope)
+  if (!parsedSuccessEnvelope.success) {
     throw invalidResponse(response.status, 'Upstream response envelope was invalid')
   }
 
-  const envelope = parsedEnvelope.data
+  const envelope = parsedSuccessEnvelope.data
   if (envelope.code !== 0) {
     const message = safeText(
       envelope.message ?? 'Upstream success response had a nonzero code',

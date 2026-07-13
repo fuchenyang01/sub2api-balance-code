@@ -302,6 +302,15 @@ describe('sub2api clients', () => {
     )
   })
 
+  it('rejects a success envelope without a message', async () => {
+    handler = (_request, response) => json(response, 200, { code: 0, data: profile })
+    const client = new Sub2ApiUserClient(baseUrl, 1_000)
+
+    await expect(client.getProfile('user-jwt')).rejects.toSatisfy((error: unknown) =>
+      isUpstreamError(error, 'invalid-response'),
+    )
+  })
+
   it('preserves status and reason on a nonzero success envelope', async () => {
     handler = (_request, response) =>
       json(response, 200, {
@@ -330,6 +339,32 @@ describe('sub2api clients', () => {
     )
   })
 
+  it('classifies a timeout while reading a partial response body', async () => {
+    handler = (_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.write('{"code":0,"message":"success","data":')
+    }
+    const client = new Sub2ApiUserClient(baseUrl, 20)
+
+    await expect(client.getProfile('user-jwt')).rejects.toSatisfy((error: unknown) =>
+      isUpstreamError(error, 'timeout'),
+    )
+  })
+
+  it('classifies a socket reset while reading a partial response body as network', async () => {
+    handler = (_request, response) => {
+      const socket = response.socket
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.write('{"code":0,"message":"success","data":')
+      setImmediate(() => socket?.destroy())
+    }
+    const client = new Sub2ApiUserClient(baseUrl, 1_000)
+
+    await expect(client.getProfile('user-jwt')).rejects.toSatisfy((error: unknown) =>
+      isUpstreamError(error, 'network'),
+    )
+  })
+
   it('classifies a connection failure as network', async () => {
     const address = server.address() as AddressInfo
     await closeServer(server)
@@ -338,6 +373,35 @@ describe('sub2api clients', () => {
     await expect(client.getProfile('user-jwt')).rejects.toSatisfy((error: unknown) =>
       isUpstreamError(error, 'network'),
     )
+  })
+
+  it('does not follow an admin redirect to another origin', async () => {
+    let targetRequests = 0
+    let targetHeaders: IncomingMessage['headers'] | undefined
+    const targetServer = createServer((request, response) => {
+      targetRequests += 1
+      targetHeaders = request.headers
+      response.end('unexpected redirect target')
+    })
+    targetServer.listen(0, '127.0.0.1')
+    await once(targetServer, 'listening')
+    const targetAddress = targetServer.address() as AddressInfo
+
+    try {
+      handler = (_request, response) => {
+        response.writeHead(307, {
+          location: `http://127.0.0.1:${targetAddress.port}/credential-target`,
+        })
+        response.end()
+      }
+      const client = new Sub2ApiAdminClient(baseUrl, 'admin-secret', 1_000)
+
+      await expect(client.generateCode('op', 1)).rejects.toBeInstanceOf(UpstreamError)
+      expect(targetRequests).toBe(0)
+      expect(targetHeaders).toBeUndefined()
+    } finally {
+      await closeServer(targetServer)
+    }
   })
 
   it.each([
