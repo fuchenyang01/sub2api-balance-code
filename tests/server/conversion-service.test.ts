@@ -25,6 +25,20 @@ function deferred<T = void>(): {
   return { promise, resolve }
 }
 
+async function resolvesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      promise.then(() => true),
+      new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
 function code(overrides: Partial<RedeemCode> = {}): RedeemCode {
   return {
     id: 91,
@@ -462,6 +476,21 @@ describe('ConversionService.execute', () => {
     expect(admin.calls.some(([name]) => name === 'delete')).toBe(false)
   })
 
+  it.each([
+    ['type', code({ type: 'quota' })],
+    ['value', code({ value: 11 })],
+  ])('rejects latest code %s conflicts without deleting the record', async (_name, latestCode) => {
+    const { service, admin } = setup()
+    admin.debitHook = () => {
+      admin.stored = latestCode
+    }
+    admin.debitErrors.push(upstream('insufficient-balance', 409))
+
+    await expectAppError(() => service.execute('operation-token', userId), 'UPSTREAM_DATA_CONFLICT')
+    expect(admin.calls.filter(([name]) => name === 'getCode')).toHaveLength(2)
+    expect(admin.calls.some(([name]) => name === 'delete')).toBe(false)
+  })
+
   it('terminates without deletion when the compensation precheck finds the code missing', async () => {
     const { service, admin } = setup()
     admin.debitHook = () => {
@@ -677,9 +706,11 @@ describe('ConversionService.execute', () => {
     const first = service.execute('first-token', userId)
     await firstEntered.promise
     const second = service.execute('second-token', 8)
-    await secondEntered.promise
-
-    firstRelease.resolve()
-    await Promise.all([first, second])
+    try {
+      expect(await resolvesWithin(secondEntered.promise, 500)).toBe(true)
+    } finally {
+      firstRelease.resolve()
+      await Promise.all([first, second])
+    }
   })
 })

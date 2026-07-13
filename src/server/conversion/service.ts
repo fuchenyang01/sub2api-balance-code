@@ -16,20 +16,27 @@ import { KeyedMutex } from './keyed-mutex.js'
 
 type OperationSecrets = Pick<SecretsService, 'signOperation' | 'verifyOperation'>
 
-const uncertainKinds: ReadonlySet<UpstreamErrorKind> = new Set([
-  'timeout',
-  'network',
-  'idempotency-in-progress',
-  'idempotency-store-unavailable',
-  'invalid-response',
-])
-
 function isUncertain(error: unknown): error is UpstreamError {
   if (!isUpstreamError(error)) return false
-  if (error.kind === 'http') {
-    return error.status === undefined || error.status === 408 || error.status >= 500
+  const kind: UpstreamErrorKind = error.kind
+  switch (kind) {
+    case 'timeout':
+    case 'network':
+    case 'idempotency-in-progress':
+    case 'idempotency-store-unavailable':
+    case 'invalid-response':
+      return true
+    case 'http':
+      return error.status === undefined || error.status === 408 || error.status >= 500
+    case 'auth':
+    case 'not-found':
+    case 'insufficient-balance':
+      return false
+    default: {
+      const exhaustive: never = kind
+      return exhaustive
+    }
   }
-  return uncertainKinds.has(error.kind)
 }
 
 function pending(operationId: string, error: UpstreamError): ExecuteResponse {
@@ -139,7 +146,7 @@ export class ConversionService {
       await this.#admin.debitBalance(operation.userId, operation.operationId, upstreamAmount)
     } catch (error) {
       if (isUpstreamError(error, 'insufficient-balance')) {
-        return this.#compensate(operation.operationId, stored.id)
+        return this.#compensate(operation.operationId, stored.id, amount)
       }
       if (isUncertain(error)) return pending(operation.operationId, error)
       throw upstreamFailure(error)
@@ -154,7 +161,11 @@ export class ConversionService {
     }
   }
 
-  async #compensate(operationId: string, codeId: number): Promise<ExecuteResponse> {
+  async #compensate(
+    operationId: string,
+    codeId: number,
+    amount: Decimal,
+  ): Promise<ExecuteResponse> {
     let latest: RedeemCode | null
     try {
       latest = await this.#admin.getCode(codeId)
@@ -164,6 +175,7 @@ export class ConversionService {
     }
 
     if (latest === null) throw terminated()
+    validateCode(latest, amount)
     if (latest.status !== 'unused' || latest.used_by !== null) {
       return {
         status: 'pending',
