@@ -1,4 +1,4 @@
-import type { FastifyInstance } from 'fastify'
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 
 import type {
   ExecuteRequest,
@@ -39,27 +39,59 @@ const executeBodySchema = {
   additionalProperties: false,
 } as const
 
+function manualLimitHook(
+  checkLimit: ReturnType<FastifyInstance['createRateLimit']>,
+): (request: FastifyRequest, reply: FastifyReply) => Promise<void> {
+  return async (request, reply) => {
+    const result = await checkLimit(request)
+    if (result.isAllowed) return
+
+    reply.header('x-ratelimit-limit', result.max)
+    reply.header('x-ratelimit-remaining', result.remaining)
+    reply.header('x-ratelimit-reset', result.ttlInSeconds)
+    if (!result.isExceeded) return
+
+    reply.header('retry-after', result.ttlInSeconds)
+    throw Object.assign(new Error('Rate limited'), { statusCode: 429 })
+  }
+}
+
 export function registerConversionRoutes(
   app: FastifyInstance,
   sessions: SessionReader,
   conversions: ConversionOperations,
 ): void {
-  const prepareLimit = app.rateLimit({
+  const prepareIpLimit = app.rateLimit({
+    max: 30,
+    timeWindow: 60_000,
+    keyGenerator: (request) => `prepare:${request.ip}`,
+  })
+  const executeIpLimit = app.rateLimit({
+    max: 30,
+    timeWindow: 60_000,
+    keyGenerator: (request) => `execute:${request.ip}`,
+  })
+  const prepareLimit = manualLimitHook(app.createRateLimit({
     max: 10,
     timeWindow: 60_000,
-    keyGenerator: (request) => `${sessions.get(request).userId}:prepare`,
-  })
-  const executeLimit = app.rateLimit({
+    keyGenerator: (request) => `${sessions.getIdentity(request).userId}:prepare`,
+  }))
+  const executeLimit = manualLimitHook(app.createRateLimit({
     max: 10,
     timeWindow: 60_000,
-    keyGenerator: (request) => `${sessions.get(request).userId}:execute`,
-  })
+    keyGenerator: (request) => `${sessions.getIdentity(request).userId}:execute`,
+  }))
 
   app.post<{ Body: PrepareRequest }>(
     '/api/conversions/prepare',
     {
       schema: { body: prepareBodySchema },
-      preHandler: [sessions.authenticate, prepareLimit],
+      preHandler: [
+        prepareIpLimit,
+        sessions.loadIdentity,
+        prepareLimit,
+        sessions.revalidate,
+      ],
     },
     async (request) => {
       const session = sessions.get(request)
@@ -76,7 +108,12 @@ export function registerConversionRoutes(
     '/api/conversions/execute',
     {
       schema: { body: executeBodySchema },
-      preHandler: [sessions.authenticate, executeLimit],
+      preHandler: [
+        executeIpLimit,
+        sessions.loadIdentity,
+        executeLimit,
+        sessions.revalidate,
+      ],
     },
     async (request, reply) => {
       const session = sessions.get(request)

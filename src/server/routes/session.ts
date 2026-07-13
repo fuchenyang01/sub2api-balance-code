@@ -11,6 +11,8 @@ import type { Profile } from '../sub2api/types.js'
 import type { UserClient } from '../sub2api/user-client.js'
 
 export const sessionCookieName = 'redeem_session'
+// Browsers commonly enforce a 4096-byte limit on the complete serialized cookie.
+const maxSerializedCookieBytes = 4_096
 
 export interface SessionSecrets {
   sealSession(input: { userJwt: string; userId: number; expiresAt: Date }): Promise<string>
@@ -21,6 +23,11 @@ export interface AuthenticatedSession {
   userJwt: string
   userId: number
   profile: Profile
+}
+
+export interface SessionIdentity {
+  userJwt: string
+  userId: number
 }
 
 interface ReadSessionDependencies {
@@ -97,6 +104,9 @@ function jwtExpiry(userJwt: string): Date {
   if (!Number.isFinite(expiresAt.getTime())) {
     throw new AppError('SESSION_INVALID', 401, '会话无效')
   }
+  if (expiresAt.getUTCFullYear() > 9_999) {
+    throw new AppError('SESSION_INVALID', 400, '会话无效')
+  }
   return expiresAt
 }
 
@@ -118,11 +128,11 @@ async function exchangeIdentity(
   return { profile, expiresAt: jwtExpiry(userJwt) }
 }
 
-export async function readSession(
+async function readSessionIdentity(
   request: FastifyRequest,
   reply: FastifyReply,
   dependencies: ReadSessionDependencies,
-): Promise<AuthenticatedSession> {
+): Promise<SessionIdentity> {
   const cookie = request.cookies[sessionCookieName]
   if (cookie === undefined || cookie.length === 0) {
     throw new AppError('SESSION_REQUIRED', 401, '需要登录')
@@ -142,9 +152,17 @@ export async function readSession(
     throw upstreamUnavailable()
   }
 
+  return { userJwt: session.userJwt, userId: session.userId }
+}
+
+async function revalidateSession(
+  identity: SessionIdentity,
+  reply: FastifyReply,
+  dependencies: ReadSessionDependencies,
+): Promise<AuthenticatedSession> {
   let latest: Profile
   try {
-    latest = await verifiedProfile(dependencies.users, session.userJwt, 'SESSION_EXPIRED')
+    latest = await verifiedProfile(dependencies.users, identity.userJwt, 'SESSION_EXPIRED')
   } catch (error) {
     if (error instanceof AppError && error.code === 'SESSION_EXPIRED') {
       clearSessionCookie(reply, dependencies.config)
@@ -152,21 +170,49 @@ export async function readSession(
     throw error
   }
 
-  if (latest.id !== session.userId) {
+  if (latest.id !== identity.userId) {
     clearSessionCookie(reply, dependencies.config)
     throw new AppError('SESSION_INVALID', 401, '会话无效')
   }
 
-  return { userJwt: session.userJwt, userId: session.userId, profile: latest }
+  return { ...identity, profile: latest }
+}
+
+export async function readSession(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  dependencies: ReadSessionDependencies,
+): Promise<AuthenticatedSession> {
+  const identity = await readSessionIdentity(request, reply, dependencies)
+  return revalidateSession(identity, reply, dependencies)
 }
 
 export class SessionReader {
+  readonly #identities = new WeakMap<FastifyRequest, SessionIdentity>()
   readonly #sessions = new WeakMap<FastifyRequest, AuthenticatedSession>()
 
   constructor(private readonly dependencies: ReadSessionDependencies) {}
 
+  readonly loadIdentity = async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
+    this.#identities.set(request, await readSessionIdentity(request, reply, this.dependencies))
+  }
+
+  readonly revalidate = async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
+    const identity = this.getIdentity(request)
+    this.#sessions.set(request, await revalidateSession(identity, reply, this.dependencies))
+  }
+
   readonly authenticate = async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
-    this.#sessions.set(request, await readSession(request, reply, this.dependencies))
+    await this.loadIdentity(request, reply)
+    await this.revalidate(request, reply)
+  }
+
+  getIdentity(request: FastifyRequest): SessionIdentity {
+    const identity = this.#identities.get(request)
+    if (identity === undefined) {
+      throw new AppError('SESSION_REQUIRED', 401, '需要登录')
+    }
+    return identity
   }
 
   get(request: FastifyRequest): AuthenticatedSession {
@@ -202,11 +248,21 @@ export function registerSessionRoutes(
         userId: profile.id,
         expiresAt,
       })
-
-      reply.setCookie(sessionCookieName, session, {
+      const options = {
         ...cookieOptions(dependencies.config),
         expires: expiresAt,
-      })
+      }
+      let serializedCookie: string
+      try {
+        serializedCookie = app.serializeCookie(sessionCookieName, session, options)
+      } catch {
+        throw new AppError('SESSION_INVALID', 400, '会话无效')
+      }
+      if (Buffer.byteLength(serializedCookie, 'utf8') > maxSerializedCookieBytes) {
+        throw new AppError('SESSION_INVALID', 400, '会话无效')
+      }
+
+      reply.setCookie(sessionCookieName, session, options)
       return minimalProfile(profile)
     },
   )

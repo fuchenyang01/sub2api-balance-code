@@ -197,6 +197,34 @@ describe('session routes', () => {
     expect(session.expiresAt).toBe(new Date(exp * 1_000).toISOString())
   })
 
+  it('rejects a JWT whose fully serialized session cookie exceeds 4096 bytes', async () => {
+    const { app } = await setup()
+    const largeJwt = rawJwt({
+      exp: Math.floor(Date.now() / 1_000) + 3_600,
+      padding: 'x'.repeat(2_800),
+    })
+    expect(Buffer.byteLength(largeJwt, 'utf8')).toBeLessThan(8_192)
+
+    const response = await exchange(app, largeJwt)
+
+    expect(response.statusCode).toBe(400)
+    stableError(response, 'SESSION_INVALID')
+    expect(response.headers['set-cookie']).toBeUndefined()
+    expect(response.body).not.toContain(largeJwt)
+  })
+
+  it('rejects an exp whose year cannot be represented by a standard HTTP-date', async () => {
+    const { app } = await setup()
+    const extremeJwt = jwt(Date.UTC(10_000, 0, 1) / 1_000)
+
+    const response = await exchange(app, extremeJwt)
+
+    expect(response.statusCode).toBe(400)
+    stableError(response, 'SESSION_INVALID')
+    expect(response.headers['set-cookie']).toBeUndefined()
+    expect(response.body).not.toContain(extremeJwt)
+  })
+
   it('rejects malformed, missing-exp, unsafe-exp, and expired JWTs without leaking them', async () => {
     const { app } = await setup()
     const cases = [
@@ -539,7 +567,8 @@ describe('security headers, rate limits, and logging', () => {
     }
     const exchangeLimited = await exchange(app)
     expect(exchangeLimited.statusCode).toBe(429)
-    stableError(exchangeLimited, 'SESSION_INVALID')
+    stableError(exchangeLimited, 'RATE_LIMITED')
+    expect(exchangeLimited.headers['retry-after']).toBeDefined()
 
     const prepare = await app.inject({
       method: 'POST',
@@ -578,7 +607,8 @@ describe('security headers, rate limits, and logging', () => {
     }
     const prepareLimited = await send(first.app, firstCookie, 'prepare')
     expect(prepareLimited.statusCode).toBe(429)
-    stableError(prepareLimited, 'AMOUNT_INVALID')
+    stableError(prepareLimited, 'RATE_LIMITED')
+    expect(prepareLimited.headers['retry-after']).toBeDefined()
     expect((await send(first.app, firstCookie, 'execute')).statusCode).toBe(200)
 
     const second = await setup()
@@ -588,8 +618,62 @@ describe('security headers, rate limits, and logging', () => {
     }
     const executeLimited = await send(second.app, secondCookie, 'execute')
     expect(executeLimited.statusCode).toBe(429)
-    stableError(executeLimited, 'OPERATION_TOKEN_INVALID')
+    stableError(executeLimited, 'RATE_LIMITED')
+    expect(executeLimited.headers['retry-after']).toBeDefined()
     expect((await send(second.app, secondCookie, 'prepare')).statusCode).toBe(200)
+  })
+
+  it.each([
+    ['prepare', { operation_id: operationId, amount: '1' }],
+    ['execute', { operation_token: 'operation-token' }],
+  ] as const)('applies the %s user limit before upstream profile revalidation', async (route, payload) => {
+    const { app, users } = await setup()
+    const cookie = await cookieFor(app)
+    users.calls = []
+    const send = () => app.inject({
+      method: 'POST',
+      url: `/api/conversions/${route}`,
+      headers: { origin: appOrigin, cookie },
+      payload,
+    })
+
+    for (let count = 0; count < 10; count += 1) {
+      expect((await send()).statusCode).toBe(200)
+    }
+    expect(users.calls).toHaveLength(10)
+
+    const limited = await send()
+    expect(limited.statusCode).toBe(429)
+    stableError(limited, 'RATE_LIMITED')
+    expect(limited.headers['retry-after']).toBeDefined()
+    expect(users.calls).toHaveLength(10)
+  })
+
+  it('applies independent route IP limits before reading a protected session', async () => {
+    const { app } = await setup()
+    const prepareWithoutCookie = () => app.inject({
+      method: 'POST',
+      url: '/api/conversions/prepare',
+      headers: { origin: appOrigin },
+      payload: { operation_id: operationId, amount: '1' },
+    })
+
+    for (let count = 0; count < 30; count += 1) {
+      expect((await prepareWithoutCookie()).statusCode).toBe(401)
+    }
+    const limited = await prepareWithoutCookie()
+    expect(limited.statusCode).toBe(429)
+    stableError(limited, 'RATE_LIMITED')
+    expect(limited.headers['retry-after']).toBeDefined()
+
+    const execute = await app.inject({
+      method: 'POST',
+      url: '/api/conversions/execute',
+      headers: { origin: appOrigin },
+      payload: { operation_token: 'operation-token' },
+    })
+    expect(execute.statusCode).toBe(401)
+    stableError(execute, 'SESSION_REQUIRED')
   })
 
   it('keys protected rate limits by authenticated user ID', async () => {
@@ -615,7 +699,10 @@ describe('security headers, rate limits, and logging', () => {
     for (let count = 0; count < 10; count += 1) {
       expect((await prepare(user7Cookie)).statusCode).toBe(200)
     }
-    expect((await prepare(user7Cookie)).statusCode).toBe(429)
+    const limited = await prepare(user7Cookie)
+    expect(limited.statusCode).toBe(429)
+    stableError(limited, 'RATE_LIMITED')
+    expect(limited.headers['retry-after']).toBeDefined()
     expect((await prepare(user8Cookie)).statusCode).toBe(200)
   })
 

@@ -45,6 +45,7 @@ const safeMessages: Record<ErrorCode, string> = {
   OPERATION_TERMINATED: '操作已终止',
   CONVERSION_IN_PROGRESS: '兑换正在处理中',
   CONVERSION_PENDING: '兑换结果待确认',
+  RATE_LIMITED: '请求过于频繁，请稍后重试',
   UPSTREAM_AUTH_FAILED: '上游鉴权失败',
   UPSTREAM_IDEMPOTENCY_UNAVAILABLE: '上游幂等服务不可用',
   UPSTREAM_DATA_CONFLICT: '上游数据冲突',
@@ -90,7 +91,7 @@ function installErrorHandler(app: FastifyInstance, config: Readonly<AppConfig>):
         clearSessionCookie(reply, config)
       }
     } else if (error.statusCode === 429) {
-      code = routeErrorCode(request)
+      code = 'RATE_LIMITED'
       status = 429
     } else if (isValidationError(error)) {
       code = routeErrorCode(request)
