@@ -5,14 +5,18 @@ import { amountToUpstreamNumber, normalizeAmount, parseAmount } from '../amount.
 import { AppError } from '../errors.js'
 import type { OperationPayload, SecretsService } from '../security/secrets.js'
 import type { AdminClient } from '../sub2api/admin-client.js'
-import { isUpstreamError, type UpstreamError } from '../sub2api/http.js'
+import {
+  isUpstreamError,
+  type UpstreamError,
+  type UpstreamErrorKind,
+} from '../sub2api/http.js'
 import type { RedeemCode } from '../sub2api/types.js'
 import type { UserClient } from '../sub2api/user-client.js'
 import { KeyedMutex } from './keyed-mutex.js'
 
 type OperationSecrets = Pick<SecretsService, 'signOperation' | 'verifyOperation'>
 
-const uncertainKinds = new Set([
+const uncertainKinds: ReadonlySet<UpstreamErrorKind> = new Set([
   'timeout',
   'network',
   'idempotency-in-progress',
@@ -22,7 +26,9 @@ const uncertainKinds = new Set([
 
 function isUncertain(error: unknown): error is UpstreamError {
   if (!isUpstreamError(error)) return false
-  if (error.kind === 'http') return error.status === undefined || error.status >= 500
+  if (error.kind === 'http') {
+    return error.status === undefined || error.status === 408 || error.status >= 500
+  }
   return uncertainKinds.has(error.kind)
 }
 
@@ -133,14 +139,7 @@ export class ConversionService {
       await this.#admin.debitBalance(operation.userId, operation.operationId, upstreamAmount)
     } catch (error) {
       if (isUpstreamError(error, 'insufficient-balance')) {
-        if (stored.status !== 'unused' || stored.used_by !== null) {
-          return {
-            status: 'pending',
-            operation_id: operation.operationId,
-            error: 'MANUAL_REVIEW_REQUIRED',
-          }
-        }
-        return this.#compensate(operation.operationId, stored)
+        return this.#compensate(operation.operationId, stored.id)
       }
       if (isUncertain(error)) return pending(operation.operationId, error)
       throw upstreamFailure(error)
@@ -155,16 +154,34 @@ export class ConversionService {
     }
   }
 
-  async #compensate(operationId: string, code: RedeemCode): Promise<ExecuteResponse> {
+  async #compensate(operationId: string, codeId: number): Promise<ExecuteResponse> {
+    let latest: RedeemCode | null
     try {
-      await this.#admin.deleteCode(code.id)
+      latest = await this.#admin.getCode(codeId)
+    } catch (error) {
+      if (isUncertain(error)) return pending(operationId, error)
+      throw upstreamFailure(error)
+    }
+
+    if (latest === null) throw terminated()
+    if (latest.status !== 'unused' || latest.used_by !== null) {
+      return {
+        status: 'pending',
+        operation_id: operationId,
+        error: 'MANUAL_REVIEW_REQUIRED',
+      }
+    }
+
+    // Upstream DELETE is unconditional; this recheck narrows but cannot eliminate the TOCTOU window.
+    try {
+      await this.#admin.deleteCode(codeId)
       throw terminated()
     } catch (error) {
       if (error instanceof AppError) throw error
       if (!isUncertain(error)) throw upstreamFailure(error)
 
       try {
-        const remaining = await this.#admin.getCode(code.id)
+        const remaining = await this.#admin.getCode(codeId)
         if (remaining === null) throw terminated()
       } catch (lookupError) {
         if (lookupError instanceof AppError) throw lookupError

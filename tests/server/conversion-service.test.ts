@@ -11,6 +11,7 @@ import type { UserClient } from '../../src/server/sub2api/user-client.js'
 const now = '2026-07-13T08:00:00.000Z'
 const expiresAt = '2026-07-13T08:10:00.000Z'
 const operationId = '11111111-1111-4111-8111-111111111111'
+const secondOperationId = '22222222-2222-4222-8222-222222222222'
 const userId = 7
 
 function deferred<T = void>(): {
@@ -84,16 +85,23 @@ class FakeAdminClient implements AdminClient {
   calls: AdminCall[] = []
   generated = code()
   stored: RedeemCode | null = this.generated
+  generationCache = new Map<string, RedeemCode>()
+  generateHooks = new Map<string, () => void | Promise<void>>()
   generateError?: unknown
   getErrors: unknown[] = []
   deleteErrors: unknown[] = []
   debitErrors: unknown[] = []
   generateGate: Promise<void> | undefined
+  debitHook: (() => void | Promise<void>) | undefined
 
   async generateCode(id: string, amount: number): Promise<RedeemCode> {
     this.calls.push(['generate', `code-${id}`, amount])
+    await this.generateHooks.get(id)?.()
     if (this.generateGate !== undefined) await this.generateGate
     if (this.generateError !== undefined) throw this.generateError
+    const replay = this.generationCache.get(id)
+    if (replay !== undefined) return replay
+    this.generationCache.set(id, this.generated)
     this.stored = this.generated
     return this.generated
   }
@@ -116,6 +124,7 @@ class FakeAdminClient implements AdminClient {
 
   async debitBalance(id: number, opId: string, amount: number): Promise<void> {
     this.calls.push(['debit', id, `debit-${opId}`, amount])
+    if (this.debitHook !== undefined) await this.debitHook()
     const error = this.debitErrors.shift()
     if (error !== undefined) throw error
   }
@@ -224,7 +233,7 @@ describe('ConversionService.execute', () => {
     const { service, admin } = setup()
 
     const first = await service.execute('operation-token', userId)
-    admin.generated = code({ status: 'used', used_by: userId })
+    admin.stored = code({ status: 'used', used_by: userId })
     const second = await service.execute('operation-token', userId)
 
     expect(second).toEqual(first)
@@ -246,6 +255,18 @@ describe('ConversionService.execute', () => {
     admin.generateError = upstream(kind)
 
     await expectAppError(() => service.execute('operation-token', userId), errorCode)
+    expect(admin.calls).toEqual([['generate', `code-${operationId}`, 10]])
+  })
+
+  it('returns pending for an HTTP 408 generation response', async () => {
+    const { service, admin } = setup()
+    admin.generateError = upstream('http', 408)
+
+    await expect(service.execute('operation-token', userId)).resolves.toEqual({
+      status: 'pending',
+      operation_id: operationId,
+      error: 'CONVERSION_PENDING',
+    })
     expect(admin.calls).toEqual([['generate', `code-${operationId}`, 10]])
   })
 
@@ -308,6 +329,18 @@ describe('ConversionService.execute', () => {
     expect(admin.calls.some(([name]) => name === 'debit')).toBe(false)
   })
 
+  it('returns pending for an HTTP 408 code lookup response', async () => {
+    const { service, admin } = setup()
+    admin.getErrors.push(upstream('http', 408))
+
+    await expect(service.execute('operation-token', userId)).resolves.toEqual({
+      status: 'pending',
+      operation_id: operationId,
+      error: 'CONVERSION_PENDING',
+    })
+    expect(admin.calls.some(([name]) => name === 'debit')).toBe(false)
+  })
+
   it('retries a failed lookup by replaying generation before querying the same code', async () => {
     const { service, admin } = setup()
     admin.getErrors.push(upstream('timeout'))
@@ -350,6 +383,7 @@ describe('ConversionService.execute', () => {
       ['generate', `code-${operationId}`, 10],
       ['getCode', 91],
       ['debit', userId, `debit-${operationId}`, 10],
+      ['getCode', 91],
       ['delete', 91],
     ])
   })
@@ -363,7 +397,20 @@ describe('ConversionService.execute', () => {
     }
 
     await expectAppError(() => service.execute('operation-token', userId), 'OPERATION_TERMINATED')
-    expect(admin.calls.filter(([name]) => name === 'getCode')).toHaveLength(1)
+    expect(admin.calls.filter(([name]) => name === 'getCode')).toHaveLength(2)
+  })
+
+  it('does not recreate a compensated code when generation is replayed with the same token', async () => {
+    const { service, admin } = setup()
+    admin.debitErrors.push(upstream('insufficient-balance', 409))
+
+    await expectAppError(() => service.execute('operation-token', userId), 'OPERATION_TERMINATED')
+    expect(admin.stored).toBeNull()
+    await expectAppError(() => service.execute('operation-token', userId), 'OPERATION_TERMINATED')
+
+    expect(admin.calls.filter(([name]) => name === 'generate')).toHaveLength(2)
+    expect(admin.calls.filter(([name]) => name === 'debit')).toHaveLength(1)
+    expect(admin.calls.filter(([name]) => name === 'delete')).toHaveLength(1)
   })
 
   it('never deletes an already used code when debit unexpectedly reports insufficient balance', async () => {
@@ -377,6 +424,105 @@ describe('ConversionService.execute', () => {
       error: 'MANUAL_REVIEW_REQUIRED',
     })
     expect(admin.calls.some(([name]) => name === 'delete')).toBe(false)
+    expect(admin.calls.filter(([name]) => name === 'getCode')).toHaveLength(2)
+  })
+
+  it('rechecks the code and does not delete when it becomes used during debit', async () => {
+    const { service, admin } = setup()
+    admin.debitHook = () => {
+      admin.stored = code({ status: 'used', used_by: userId })
+    }
+    admin.debitErrors.push(upstream('insufficient-balance', 409))
+
+    await expect(service.execute('operation-token', userId)).resolves.toEqual({
+      status: 'pending',
+      operation_id: operationId,
+      error: 'MANUAL_REVIEW_REQUIRED',
+    })
+    expect(admin.calls.filter(([name]) => name === 'getCode')).toHaveLength(2)
+    expect(admin.calls.some(([name]) => name === 'delete')).toBe(false)
+  })
+
+  it.each([
+    ['used with no user', code({ status: 'used', used_by: null })],
+    ['unused with a user', code({ status: 'unused', used_by: userId })],
+    ['unknown status', code({ status: 'suspended', used_by: null })],
+  ])('requires manual review for latest code state %s', async (_name, latestCode) => {
+    const { service, admin } = setup()
+    admin.debitHook = () => {
+      admin.stored = latestCode
+    }
+    admin.debitErrors.push(upstream('insufficient-balance', 409))
+
+    await expect(service.execute('operation-token', userId)).resolves.toEqual({
+      status: 'pending',
+      operation_id: operationId,
+      error: 'MANUAL_REVIEW_REQUIRED',
+    })
+    expect(admin.calls.some(([name]) => name === 'delete')).toBe(false)
+  })
+
+  it('terminates without deletion when the compensation precheck finds the code missing', async () => {
+    const { service, admin } = setup()
+    admin.debitHook = () => {
+      admin.stored = null
+    }
+    admin.debitErrors.push(upstream('insufficient-balance', 409))
+
+    await expectAppError(() => service.execute('operation-token', userId), 'OPERATION_TERMINATED')
+    expect(admin.calls.filter(([name]) => name === 'getCode')).toHaveLength(2)
+    expect(admin.calls.some(([name]) => name === 'delete')).toBe(false)
+  })
+
+  it.each([
+    ['timeout', undefined, 'CONVERSION_PENDING'],
+    ['network', undefined, 'CONVERSION_PENDING'],
+    ['idempotency-in-progress', undefined, 'CONVERSION_IN_PROGRESS'],
+    ['idempotency-store-unavailable', undefined, 'UPSTREAM_IDEMPOTENCY_UNAVAILABLE'],
+    ['http', 408, 'CONVERSION_PENDING'],
+    ['http', 500, 'CONVERSION_PENDING'],
+    ['invalid-response', undefined, 'CONVERSION_PENDING'],
+  ] as const)(
+    'returns pending without deletion when compensation precheck fails with %s %s',
+    async (kind, status, error) => {
+      const { service, admin } = setup()
+      admin.debitErrors.push(upstream('insufficient-balance', 409))
+      admin.getErrors.push(undefined, upstream(kind, status))
+
+      await expect(service.execute('operation-token', userId)).resolves.toEqual({
+        status: 'pending',
+        operation_id: operationId,
+        error,
+      })
+      expect(admin.calls.some(([name]) => name === 'delete')).toBe(false)
+    },
+  )
+
+  it.each([
+    ['auth', undefined, 'UPSTREAM_AUTH_FAILED'],
+    ['http', 400, 'UPSTREAM_UNAVAILABLE'],
+  ] as const)(
+    'maps definite compensation precheck failure %s %s without deletion',
+    async (kind, status, errorCode) => {
+      const { service, admin } = setup()
+      admin.debitErrors.push(upstream('insufficient-balance', 409))
+      admin.getErrors.push(undefined, upstream(kind, status))
+
+      await expectAppError(() => service.execute('operation-token', userId), errorCode)
+      expect(admin.calls.some(([name]) => name === 'delete')).toBe(false)
+    },
+  )
+
+  it('returns pending without deletion for an HTTP 408 debit response', async () => {
+    const { service, admin } = setup()
+    admin.debitErrors.push(upstream('http', 408))
+
+    await expect(service.execute('operation-token', userId)).resolves.toEqual({
+      status: 'pending',
+      operation_id: operationId,
+      error: 'CONVERSION_PENDING',
+    })
+    expect(admin.calls.some(([name]) => name === 'delete')).toBe(false)
   })
 
   it('terminates when deletion times out but a confirming lookup reports missing', async () => {
@@ -385,7 +531,7 @@ describe('ConversionService.execute', () => {
     admin.deleteErrors.push(upstream('timeout'))
     admin.getCode = async (id) => {
       admin.calls.push(['getCode', id])
-      return admin.calls.filter(([name]) => name === 'getCode').length === 1 ? admin.stored : null
+      return admin.calls.filter(([name]) => name === 'getCode').length <= 2 ? admin.stored : null
     }
 
     await expectAppError(() => service.execute('operation-token', userId), 'OPERATION_TERMINATED')
@@ -402,7 +548,7 @@ describe('ConversionService.execute', () => {
     const { service, admin } = setup()
     admin.debitErrors.push(upstream('insufficient-balance'))
     admin.deleteErrors.push(upstream('timeout'))
-    if (queryError !== undefined) admin.getErrors.push(undefined, queryError)
+    if (queryError !== undefined) admin.getErrors.push(undefined, undefined, queryError)
 
     await expect(service.execute('operation-token', userId)).resolves.toEqual({
       status: 'pending',
@@ -410,6 +556,7 @@ describe('ConversionService.execute', () => {
       error: 'CONVERSION_PENDING',
     })
     expect(admin.calls.filter(([name]) => name === 'debit')).toHaveLength(1)
+    expect(admin.calls.some(([name]) => name === 'delete')).toBe(true)
   })
 
   it.each([
@@ -477,20 +624,62 @@ describe('ConversionService.execute', () => {
     expect(admin.calls).toEqual([])
   })
 
-  it('serializes concurrent operations for the same user until the first releases the lock', async () => {
-    const { service, admin } = setup()
-    const gate = deferred()
-    admin.generateGate = gate.promise
+  it('serializes different operations for the same user until the first releases the lock', async () => {
+    const { service, admin, secrets } = setup()
+    const firstEntered = deferred()
+    const firstRelease = deferred()
+    const secondVerified = deferred()
+    const events: string[] = []
+    secrets.verifyOperation = async (token) => {
+      if (token === 'first-token') return secrets.payload
+      secondVerified.resolve()
+      return { ...secrets.payload, operationId: secondOperationId }
+    }
+    admin.generateHooks.set(operationId, async () => {
+      events.push('first-entered')
+      firstEntered.resolve()
+      await firstRelease.promise
+      events.push('first-released')
+    })
+    admin.generateHooks.set(secondOperationId, () => {
+      events.push('second-entered')
+    })
 
     const first = service.execute('first-token', userId)
+    await firstEntered.promise
     const second = service.execute('second-token', userId)
-    await Promise.resolve()
-    await Promise.resolve()
-    expect(admin.calls).toEqual([['generate', `code-${operationId}`, 10]])
+    await secondVerified.promise
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(events).toEqual(['first-entered'])
 
-    admin.generateGate = undefined
-    gate.resolve()
+    firstRelease.resolve()
     await Promise.all([first, second])
-    expect(admin.calls.filter(([name]) => name === 'generate')).toHaveLength(2)
+    expect(events).toEqual(['first-entered', 'first-released', 'second-entered'])
+  })
+
+  it('allows different users with different operations to execute concurrently', async () => {
+    const { service, admin, secrets } = setup()
+    const firstEntered = deferred()
+    const firstRelease = deferred()
+    const secondEntered = deferred()
+    secrets.verifyOperation = async (token) =>
+      token === 'first-token'
+        ? secrets.payload
+        : { ...secrets.payload, operationId: secondOperationId, userId: 8 }
+    admin.generateHooks.set(operationId, async () => {
+      firstEntered.resolve()
+      await firstRelease.promise
+    })
+    admin.generateHooks.set(secondOperationId, () => {
+      secondEntered.resolve()
+    })
+
+    const first = service.execute('first-token', userId)
+    await firstEntered.promise
+    const second = service.execute('second-token', 8)
+    await secondEntered.promise
+
+    firstRelease.resolve()
+    await Promise.all([first, second])
   })
 })
