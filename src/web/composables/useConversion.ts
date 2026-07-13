@@ -43,6 +43,16 @@ const retryableCodes = new Set<ErrorCode>([
   'UPSTREAM_IDEMPOTENCY_UNAVAILABLE',
   'UPSTREAM_UNAVAILABLE',
 ])
+const deterministicPrepareCodes = new Set<ErrorCode>([
+  'AMOUNT_INVALID',
+  'AMOUNT_EXCEEDS_BALANCE',
+])
+const manualReviewExecuteCodes = new Set<ErrorCode>([
+  'OPERATION_TOKEN_INVALID',
+  'UPSTREAM_AUTH_FAILED',
+  'UPSTREAM_DATA_CONFLICT',
+  'MANUAL_REVIEW_REQUIRED',
+])
 
 export function normalizeAmount(raw: string): string {
   if (!/^\d+(?:\.\d+)?$/.test(raw) || raw.includes('e') || raw.includes('E')) {
@@ -166,21 +176,37 @@ export function createUseConversion(
     return true
   }
 
-  function expirePending(value: ExecutableOperation): void {
-    const expired: PendingOperation = {
+  function clearPendingRecovery(): boolean {
+    if (!storage.clearPending()) {
+      failStorage()
+      return false
+    }
+    pendingOperation.value = null
+    return true
+  }
+
+  function toManualReview(value: ExecutableOperation): PendingOperation {
+    return {
       version: 1,
       operation_id: value.operation_id,
       amount: value.amount,
       state: 'expired',
       expires_at: value.expires_at,
     }
-    if (persistPending(expired)) {
-      error.value = {
-        code: 'MANUAL_REVIEW_REQUIRED',
-        message: '本次兑换需要管理员核对',
-        requestId: '',
-        retryable: false,
-      }
+  }
+
+  function expirePending(value: ExecutableOperation): void {
+    const expired = toManualReview(value)
+    pendingOperation.value = expired
+    if (!storage.savePending(expired)) {
+      failStorage()
+      return
+    }
+    error.value = {
+      code: 'MANUAL_REVIEW_REQUIRED',
+      message: '本次兑换需要管理员核对',
+      requestId: '',
+      retryable: false,
     }
   }
 
@@ -319,14 +345,21 @@ export function createUseConversion(
         result.value = null
       }
     } catch (caught) {
-      if (caught instanceof ApiClientError && caught.code === 'OPERATION_TOKEN_EXPIRED') {
-        expirePending(operation)
-      } else {
-        if (!(caught instanceof ApiClientError) || retryableCodes.has(caught.code)) {
-          persistPending({ ...operation, state: 'pending' })
+      if (caught instanceof ApiClientError) {
+        if (caught.code === 'OPERATION_TERMINATED') {
+          pendingOperation.value = toManualReview(operation)
+          if (clearPendingRecovery()) handleError(caught)
+          return
         }
-        handleError(caught)
+        if (caught.code === 'OPERATION_TOKEN_EXPIRED' || manualReviewExecuteCodes.has(caught.code)) {
+          expirePending(operation)
+          return
+        }
       }
+      if (!(caught instanceof ApiClientError) || retryableCodes.has(caught.code)) {
+        if (!persistPending({ ...operation, state: 'pending' })) return
+      }
+      handleError(caught)
     }
   }
 
@@ -348,6 +381,10 @@ export function createUseConversion(
       if (!persistPending(ready)) return
       await executePrepared(ready)
     } catch (caught) {
+      if (caught instanceof ApiClientError && deterministicPrepareCodes.has(caught.code)) {
+        if (clearPendingRecovery()) handleError(caught)
+        return
+      }
       handleError(caught)
     }
   }
@@ -375,19 +412,12 @@ export function createUseConversion(
   }
 
   async function resumePending(): Promise<void> {
-    if (busy.value || pendingOperation.value === null) return
+    const operation = pendingOperation.value
+    if (busy.value || operation === null || operation.state === 'expired') return
     busy.value = true
     error.value = null
     try {
-      const operation = pendingOperation.value
-      if (operation.state === 'expired') {
-        error.value = {
-          code: 'MANUAL_REVIEW_REQUIRED',
-          message: '本次兑换需要管理员核对',
-          requestId: '',
-          retryable: false,
-        }
-      } else if (operation.state === 'preparing') {
+      if (operation.state === 'preparing') {
         await prepareAndExecute(operation)
       } else {
         await executePrepared(operation)

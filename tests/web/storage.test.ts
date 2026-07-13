@@ -126,6 +126,23 @@ describe('versioned local storage', () => {
     ])
   })
 
+  it('removes all history when a record has an unparseable created_at', () => {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify([
+      historyItem(1),
+      { ...historyItem(2), created_at: 'not-a-date' },
+    ]))
+
+    expect(loadHistory()).toEqual([])
+    expect(localStorage.getItem(HISTORY_KEY)).toBeNull()
+  })
+
+  it('accepts a parseable non-ISO history timestamp from the service contract', () => {
+    const item = { ...historyItem(1), created_at: '2026-07-13 00:00:00' }
+
+    expect(saveHistory([item])).toBe(true)
+    expect(loadHistory()).toEqual([item])
+  })
+
   it('clears history only through the explicit clear operation', () => {
     expect(saveHistory([historyItem(1)])).toBe(true)
     expect(clearHistory()).toBe(true)

@@ -295,6 +295,63 @@ describe('useConversion conversion', () => {
     expect(conversion.error.value?.code).toBe('MANUAL_REVIEW_REQUIRED')
   })
 
+  it.each(['AMOUNT_INVALID', 'AMOUNT_EXCEEDS_BALANCE'] as const)(
+    'clears preparing after deterministic %s and allows a corrected new operation',
+    async (code) => {
+      const correctedOperationId = '223e4567-e89b-42d3-a456-426614174000'
+      const randomUUID = vi.spyOn(globalThis.crypto, 'randomUUID')
+        .mockReturnValueOnce(operationId)
+        .mockReturnValueOnce(correctedOperationId)
+      const prepare = vi.fn()
+        .mockRejectedValueOnce(new ApiClientError(code, 400, 'request-amount'))
+        .mockResolvedValueOnce({
+          operation_token: 'corrected-secret',
+          expires_at: '2099-07-13T01:00:00.000Z',
+          amount: '2',
+        })
+      const execute = vi.fn().mockResolvedValue({
+        status: 'pending', operation_id: correctedOperationId, error: 'CONVERSION_PENDING',
+      })
+      const clearPending = vi.fn().mockReturnValue(true)
+      const conversion = createUseConversion(api({ prepare, execute }), storage({ clearPending }))
+
+      await conversion.convert('1')
+
+      expect(clearPending).toHaveBeenCalledTimes(1)
+      expect(conversion.pendingOperation.value).toBeNull()
+      expect(conversion.error.value).toMatchObject({ code })
+
+      await conversion.convert('2')
+
+      expect(randomUUID).toHaveBeenCalledTimes(2)
+      expect(prepare).toHaveBeenLastCalledWith({ operation_id: correctedOperationId, amount: '2' })
+      expect(execute).toHaveBeenCalledWith({ operation_token: 'corrected-secret' })
+    },
+  )
+
+  it('keeps preparing and storage failure priority when deterministic prepare cleanup fails', async () => {
+    const randomUUID = vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(operationId)
+    const prepare = vi.fn().mockRejectedValue(
+      new ApiClientError('AMOUNT_INVALID', 400, 'request-amount'),
+    )
+    const clearPending = vi.fn().mockReturnValue(false)
+    const conversion = createUseConversion(api({ prepare }), storage({ clearPending }))
+
+    await conversion.convert('1')
+    await conversion.convert('2')
+
+    expect(clearPending).toHaveBeenCalledTimes(1)
+    expect(conversion.pendingOperation.value).toEqual({
+      version: 1, operation_id: operationId, amount: '1', state: 'preparing',
+    })
+    expect(conversion.error.value).toMatchObject({
+      code: 'MANUAL_REVIEW_REQUIRED',
+      message: '无法保存本地恢复信息，请稍后重试',
+    })
+    expect(randomUUID).toHaveBeenCalledTimes(1)
+    expect(prepare).toHaveBeenCalledTimes(1)
+  })
+
   it.each([
     ['pending response', null],
     ['uncertain network error', new TypeError('network failed')],
@@ -460,6 +517,187 @@ describe('useConversion conversion', () => {
     expect(execute).not.toHaveBeenCalled()
   })
 
+  it('keeps expired manual-review state in memory when expiry downgrade persistence fails', async () => {
+    const ready: PendingOperation = {
+      version: 1,
+      operation_id: operationId,
+      amount: '1',
+      state: 'ready',
+      operation_token: 'expired-operation-secret',
+      expires_at: '2020-07-13T01:00:00.000Z',
+    }
+    const randomUUID = vi.spyOn(globalThis.crypto, 'randomUUID')
+      .mockReturnValue('223e4567-e89b-42d3-a456-426614174000')
+    const prepare = vi.fn()
+    const savePending = vi.fn()
+      .mockReturnValueOnce(false)
+      .mockReturnValue(true)
+    const conversion = createUseConversion(api({ prepare }), storage({
+      loadPending: vi.fn().mockReturnValue(ready),
+      savePending,
+    }))
+
+    await conversion.initialize()
+
+    expect(conversion.pendingOperation.value).toEqual({
+      version: 1,
+      operation_id: operationId,
+      amount: '1',
+      state: 'expired',
+      expires_at: '2020-07-13T01:00:00.000Z',
+    })
+    expect(JSON.stringify(conversion.pendingOperation.value)).not.toContain('expired-operation-secret')
+    expect(conversion.error.value).toMatchObject({ code: 'MANUAL_REVIEW_REQUIRED' })
+
+    await conversion.convert('2')
+
+    expect(randomUUID).not.toHaveBeenCalled()
+    expect(prepare).not.toHaveBeenCalled()
+    expect(savePending).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears a terminated operation and never executes it again on resume', async () => {
+    const ready: PendingOperation = {
+      version: 1,
+      operation_id: operationId,
+      amount: '1',
+      state: 'ready',
+      operation_token: 'terminated-secret',
+      expires_at: '2099-07-13T01:00:00.000Z',
+    }
+    const execute = vi.fn().mockRejectedValue(
+      new ApiClientError('OPERATION_TERMINATED', 409, 'request-terminated'),
+    )
+    const clearPending = vi.fn().mockReturnValue(true)
+    const conversion = createUseConversion(api({ execute }), storage({
+      loadPending: vi.fn().mockReturnValue(ready),
+      clearPending,
+    }))
+    await conversion.initialize()
+
+    await conversion.resumePending()
+    await conversion.resumePending()
+
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(clearPending).toHaveBeenCalledTimes(1)
+    expect(conversion.pendingOperation.value).toBeNull()
+    expect(conversion.error.value).toMatchObject({ code: 'OPERATION_TERMINATED' })
+  })
+
+  it.each([
+    'OPERATION_TOKEN_INVALID',
+    'UPSTREAM_AUTH_FAILED',
+    'UPSTREAM_DATA_CONFLICT',
+    'MANUAL_REVIEW_REQUIRED',
+  ] as const)('converts non-retryable execute error %s to tokenless manual review', async (code) => {
+    const ready: PendingOperation = {
+      version: 1,
+      operation_id: operationId,
+      amount: '1',
+      state: 'ready',
+      operation_token: 'unsafe-to-retry-secret',
+      expires_at: '2099-07-13T01:00:00.000Z',
+    }
+    const saved: PendingOperation[] = []
+    const execute = vi.fn().mockRejectedValue(new ApiClientError(code, 409, 'request-review'))
+    const conversion = createUseConversion(api({ execute }), storage({
+      loadPending: vi.fn().mockReturnValue(ready),
+      savePending: vi.fn().mockImplementation((value: PendingOperation) => {
+        saved.push(value)
+        return true
+      }),
+    }))
+    await conversion.initialize()
+
+    await conversion.resumePending()
+    await conversion.resumePending()
+
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(saved.at(-1)).toEqual({
+      version: 1,
+      operation_id: operationId,
+      amount: '1',
+      state: 'expired',
+      expires_at: '2099-07-13T01:00:00.000Z',
+    })
+    expect(conversion.pendingOperation.value).toEqual(saved.at(-1))
+    expect(JSON.stringify(conversion.pendingOperation.value)).not.toContain('unsafe-to-retry-secret')
+    expect(conversion.error.value).toMatchObject({ code: 'MANUAL_REVIEW_REQUIRED' })
+  })
+
+  it('keeps terminated manual-review state in memory when clearing storage fails', async () => {
+    const ready: PendingOperation = {
+      version: 1,
+      operation_id: operationId,
+      amount: '1',
+      state: 'ready',
+      operation_token: 'terminated-secret',
+      expires_at: '2099-07-13T01:00:00.000Z',
+    }
+    const randomUUID = vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(operationId)
+    const execute = vi.fn().mockRejectedValue(
+      new ApiClientError('OPERATION_TERMINATED', 409, 'request-terminated'),
+    )
+    const conversion = createUseConversion(api({ execute }), storage({
+      loadPending: vi.fn().mockReturnValue(ready),
+      clearPending: vi.fn().mockReturnValue(false),
+    }))
+    await conversion.initialize()
+
+    await conversion.resumePending()
+    await conversion.resumePending()
+    await conversion.convert('2')
+
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(randomUUID).not.toHaveBeenCalled()
+    expect(conversion.pendingOperation.value).toEqual({
+      version: 1,
+      operation_id: operationId,
+      amount: '1',
+      state: 'expired',
+      expires_at: '2099-07-13T01:00:00.000Z',
+    })
+    expect(conversion.error.value).toMatchObject({
+      code: 'MANUAL_REVIEW_REQUIRED',
+      message: '无法保存本地恢复信息，请稍后重试',
+    })
+  })
+
+  it('keeps tokenless manual-review state and storage error priority when downgrade save fails', async () => {
+    const ready: PendingOperation = {
+      version: 1,
+      operation_id: operationId,
+      amount: '1',
+      state: 'ready',
+      operation_token: 'invalid-secret',
+      expires_at: '2099-07-13T01:00:00.000Z',
+    }
+    const execute = vi.fn().mockRejectedValue(
+      new ApiClientError('OPERATION_TOKEN_INVALID', 400, 'request-invalid'),
+    )
+    const conversion = createUseConversion(api({ execute }), storage({
+      loadPending: vi.fn().mockReturnValue(ready),
+      savePending: vi.fn().mockReturnValue(false),
+    }))
+    await conversion.initialize()
+
+    await conversion.resumePending()
+    await conversion.resumePending()
+
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(conversion.pendingOperation.value).toEqual({
+      version: 1,
+      operation_id: operationId,
+      amount: '1',
+      state: 'expired',
+      expires_at: '2099-07-13T01:00:00.000Z',
+    })
+    expect(conversion.error.value).toMatchObject({
+      code: 'MANUAL_REVIEW_REQUIRED',
+      message: '无法保存本地恢复信息，请稍后重试',
+    })
+  })
+
   it('does not clear pending when completed history cannot be persisted', async () => {
     vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(operationId)
     const clearPending = vi.fn()
@@ -584,7 +822,7 @@ describe('useConversion conversion', () => {
         error: 'CONVERSION_PENDING' as const,
       },
     ],
-  ])('rejects a mismatched %s without publishing result state', async (_name, response) => {
+  ])('rejects a mismatched %s and requires tokenless manual review', async (_name, response) => {
     vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(operationId)
     const client = api({
       prepare: vi.fn().mockResolvedValue({
@@ -600,7 +838,13 @@ describe('useConversion conversion', () => {
 
     expect(conversion.result.value).toBeNull()
     expect(conversion.pending.value).toBeNull()
-    expect(conversion.error.value).toMatchObject({ code: 'UPSTREAM_DATA_CONFLICT' })
+    expect(conversion.pendingOperation.value).toMatchObject({
+      operation_id: operationId,
+      amount: '1',
+      state: 'expired',
+    })
+    expect(conversion.pendingOperation.value).not.toHaveProperty('operation_token')
+    expect(conversion.error.value).toMatchObject({ code: 'MANUAL_REVIEW_REQUIRED' })
     expect(JSON.stringify(conversion.error.value)).not.toContain('MUST-NOT-DISPLAY')
   })
 })

@@ -91,7 +91,7 @@ function parseHistoryItem(value: unknown): HistoryItem | null {
     || !isNonEmptyString(value.operation_id)
     || !isPositiveAmount(value.amount)
     || !isNonEmptyString(value.code)
-    || !isNonEmptyString(value.created_at)) return null
+    || !isDate(value.created_at)) return null
   return {
     version: 1,
     operation_id: value.operation_id,
