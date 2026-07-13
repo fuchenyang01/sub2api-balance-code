@@ -1,0 +1,45 @@
+{
+  "name": "sub2api-balance-code",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server/main.ts",
+    "dev:web": "vite --config vite.config.ts",
+    "build": "npm run typecheck && npm run build:web && npm run build:server",
+    "build:web": "vite build --config vite.config.ts",
+    "build:server": "tsup src/server/main.ts --format esm --platform node --out-dir dist/server --clean",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.1.1",
+    "@fastify/helmet": "^13.1.0",
+    "@fastify/rate-limit": "^11.1.0",
+    "@fastify/static": "^10.1.0",
+    "decimal.js": "^10.6.0",
+    "fastify": "^5.10.0",
+    "jose": "^6.2.3",
+    "lucide-vue-next": "^0.577.0",
+    "vue": "^3.5.39",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@types/node": "^22.20.0",
+    "@vitejs/plugin-vue": "^5.2.4",
+    "@vue/test-utils": "^2.4.11",
+    "jsdom": "^26.1.0",
+    "tsup": "^8.5.1",
+    "tsx": "^4.23.1",
+    "typescript": "^5.9.3",
+    "vite": "^6.4.3",
+    "vitest": "^3.2.7",
+    "vue-tsc": "^3.3.7"
+  }
+}
