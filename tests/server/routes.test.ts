@@ -1,0 +1,547 @@
+import { Writable } from 'node:stream'
+
+import type { FastifyInstance } from 'fastify'
+import { afterEach, describe, expect, it } from 'vitest'
+
+import { buildApp, type AppDependencies } from '../../src/server/app.js'
+import type { AppConfig } from '../../src/server/config.js'
+import type { ExecuteResponse, PrepareResponse } from '../../src/shared/contracts.js'
+import { AppError } from '../../src/server/errors.js'
+import { createLoggerOptions } from '../../src/server/security/redaction.js'
+import { SecretsService } from '../../src/server/security/secrets.js'
+import { UpstreamError } from '../../src/server/sub2api/http.js'
+import type { Profile } from '../../src/server/sub2api/types.js'
+import type { UserClient } from '../../src/server/sub2api/user-client.js'
+
+const sessionSecret = 'session-secret-that-is-at-least-32-bytes'
+const operationSecret = 'operation-secret-that-is-at-least-32-bytes'
+const operationId = '123e4567-e89b-42d3-a456-426614174000'
+const appOrigin = 'https://app.example.test'
+const sub2apiOrigin = 'https://sub2api.example.test'
+
+const config: Readonly<AppConfig> = Object.freeze({
+  nodeEnv: 'test',
+  port: 3000,
+  sub2apiBaseUrl: 'https://api.example.test',
+  sub2apiAdminApiKey: 'admin-SECRET-KEY',
+  appOrigin,
+  sub2apiOrigin,
+  sessionSecret,
+  operationSigningSecret: operationSecret,
+  operationTtlMinutes: 60,
+  upstreamTimeoutMs: 1_000,
+  trustProxy: false,
+  logLevel: 'silent',
+  cookieSecure: true,
+})
+
+const profile: Profile = {
+  id: 7,
+  username: 'alice',
+  balance: 0,
+  status: 'active',
+}
+
+function rawJwt(payload: Record<string, unknown>): string {
+  return `${Buffer.from('{"alg":"none"}').toString('base64url')}.${Buffer.from(
+    JSON.stringify(payload),
+  ).toString('base64url')}.signature`
+}
+
+function jwt(exp: number = Math.floor(Date.now() / 1_000) + 3_600): string {
+  return rawJwt({ exp })
+}
+
+class FakeUsers implements UserClient {
+  calls: string[] = []
+  currentProfile: Profile = profile
+  error: unknown
+
+  async getProfile(userJwt: string): Promise<Profile> {
+    this.calls.push(userJwt)
+    if (this.error !== undefined) throw this.error
+    return this.currentProfile
+  }
+}
+
+class FakeConversions {
+  prepareCalls: Array<[string, number, string, string]> = []
+  executeCalls: Array<[string, number]> = []
+  prepareError: unknown
+  executeError: unknown
+  executeResponse: ExecuteResponse = {
+    status: 'completed',
+    operation_id: operationId,
+    amount: '12.5',
+    code: 'REDEEM-SECRET-CODE',
+    created_at: '2026-07-13T00:00:00.000Z',
+  }
+
+  async prepare(
+    userJwt: string,
+    userId: number,
+    requestedOperationId: string,
+    amount: string,
+  ): Promise<PrepareResponse> {
+    this.prepareCalls.push([userJwt, userId, requestedOperationId, amount])
+    if (this.prepareError !== undefined) throw this.prepareError
+    return {
+      operation_token: 'signed-operation-token',
+      expires_at: '2026-07-13T01:00:00.000Z',
+      amount,
+    }
+  }
+
+  async execute(operationToken: string, userId: number): Promise<ExecuteResponse> {
+    this.executeCalls.push([operationToken, userId])
+    if (this.executeError !== undefined) throw this.executeError
+    return this.executeResponse
+  }
+}
+
+function secrets(now: () => Date = () => new Date()): SecretsService {
+  return new SecretsService({
+    sessionSecret,
+    operationSigningSecret: operationSecret,
+    operationTtlMinutes: 60,
+    now,
+  })
+}
+
+const apps: FastifyInstance[] = []
+
+async function setup(overrides: Partial<AppDependencies> = {}) {
+  const users = new FakeUsers()
+  const conversions = new FakeConversions()
+  const app = buildApp(config, {
+    users,
+    conversions,
+    secrets: secrets(),
+    ...overrides,
+  })
+  apps.push(app)
+  await app.ready()
+  return { app, users, conversions }
+}
+
+async function exchange(app: FastifyInstance, userJwt = jwt(), url = '/api/session/exchange') {
+  return app.inject({
+    method: 'POST',
+    url,
+    headers: { origin: appOrigin },
+    payload: { token: userJwt },
+  })
+}
+
+async function cookieFor(app: FastifyInstance, userJwt = jwt()): Promise<string> {
+  const response = await exchange(app, userJwt)
+  expect(response.statusCode).toBe(200)
+  const cookie = response.headers['set-cookie']
+  expect(cookie).toBeTypeOf('string')
+  return (cookie as string).split(';', 1)[0]!
+}
+
+function stableError(response: { json(): unknown }, code: string): void {
+  const body = response.json() as Record<string, unknown>
+  expect(body).toEqual({
+    error: {
+      code,
+      message: expect.any(String),
+      request_id: expect.any(String),
+    },
+  })
+  expect(JSON.stringify(body)).not.toMatch(/"(?:stack|cause|validation)"/i)
+}
+
+afterEach(async () => {
+  await Promise.all(apps.splice(0).map((app) => app.close()))
+})
+
+describe('session routes', () => {
+  it('exchanges an upstream-verified JWT for a secure cookie and minimal zero-balance profile', async () => {
+    const { app, users } = await setup()
+    const userJwt = jwt()
+
+    const response = await exchange(app, userJwt, '/api/session/exchange?user_id=999&id=999')
+
+    expect(response.statusCode).toBe(200)
+    expect(users.calls).toEqual([userJwt])
+    expect(response.json()).toEqual({ id: 7, username: 'alice', balance: '0' })
+    expect(response.body).not.toContain(userJwt)
+    expect(response.body).not.toContain('active')
+    const setCookie = response.headers['set-cookie'] as string
+    expect(setCookie).toContain('redeem_session=')
+    expect(setCookie).toMatch(/HttpOnly/i)
+    expect(setCookie).toMatch(/Secure/i)
+    expect(setCookie).toMatch(/SameSite=Lax/i)
+    expect(setCookie).toMatch(/Path=\//i)
+    expect(setCookie).toMatch(/Expires=/i)
+  })
+
+  it('rejects malformed, missing-exp, unsafe-exp, and expired JWTs without leaking them', async () => {
+    const { app } = await setup()
+    const cases = [
+      ['malformed.jwt', 'SESSION_INVALID'],
+      [rawJwt({}), 'SESSION_INVALID'],
+      [jwt(1.5), 'SESSION_INVALID'],
+      [jwt(Math.floor(Date.now() / 1_000) - 1), 'SESSION_EXPIRED'],
+    ] as const
+
+    for (const [userJwt, code] of cases) {
+      const response = await exchange(app, userJwt)
+      expect(response.statusCode).toBe(401)
+      stableError(response, code)
+      expect(response.body).not.toContain(userJwt)
+    }
+  })
+
+  it('classifies an upstream auth rejection with an expired exp as SESSION_EXPIRED', async () => {
+    const { app, users } = await setup()
+    users.error = new UpstreamError('auth', 'expired upstream token')
+    const response = await exchange(app, jwt(Math.floor(Date.now() / 1_000) - 1))
+
+    expect(response.statusCode).toBe(401)
+    stableError(response, 'SESSION_EXPIRED')
+  })
+
+  it('requires a cookie for /api/me', async () => {
+    const { app } = await setup()
+    const response = await app.inject({ method: 'GET', url: '/api/me' })
+
+    expect(response.statusCode).toBe(401)
+    stableError(response, 'SESSION_REQUIRED')
+  })
+
+  it('uses only the verified profile identity despite forged query parameters', async () => {
+    const { app, users } = await setup()
+    const userJwt = jwt()
+    const cookie = await cookieFor(app, userJwt)
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/me?id=999&user_id=999',
+      headers: { cookie },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toEqual({ id: 7, username: 'alice', balance: '0' })
+    expect(users.calls).toEqual([userJwt, userJwt])
+  })
+
+  it.each([
+    ['tampered cookie', async (app: FastifyInstance) => `${await cookieFor(app)}tampered`, 'SESSION_INVALID'],
+    [
+      'expired cookie',
+      async () => {
+        const old = secrets(() => new Date('2020-01-01T00:00:00.000Z'))
+        return `redeem_session=${await old.sealSession({
+          userJwt: jwt(),
+          userId: 7,
+          expiresAt: new Date('2020-01-01T01:00:00.000Z'),
+        })}`
+      },
+      'SESSION_EXPIRED',
+    ],
+  ] as const)('clears a %s', async (_label, makeCookie, code) => {
+    const { app } = await setup()
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/me',
+      headers: { cookie: await makeCookie(app) },
+    })
+
+    expect(response.statusCode).toBe(401)
+    stableError(response, code)
+    expect(response.headers['set-cookie']).toMatch(/redeem_session=;/)
+  })
+
+  it('rejects a profile ID mismatch and clears the cookie', async () => {
+    const { app, users } = await setup()
+    const cookie = await cookieFor(app)
+    users.currentProfile = { ...profile, id: 8 }
+
+    const response = await app.inject({ method: 'GET', url: '/api/me', headers: { cookie } })
+
+    expect(response.statusCode).toBe(401)
+    stableError(response, 'SESSION_INVALID')
+    expect(response.headers['set-cookie']).toMatch(/redeem_session=;/)
+  })
+
+  it.each([
+    [new UpstreamError('auth', 'upstream echoed SECRET-JWT'), 'SESSION_EXPIRED', 401],
+    [new UpstreamError('network', 'upstream echoed SECRET-JWT'), 'UPSTREAM_UNAVAILABLE', 502],
+  ] as const)('maps upstream profile failures safely', async (error, code, status) => {
+    const { app, users } = await setup()
+    const cookie = await cookieFor(app)
+    users.error = error
+
+    const response = await app.inject({ method: 'GET', url: '/api/me', headers: { cookie } })
+
+    expect(response.statusCode).toBe(status)
+    stableError(response, code)
+    expect(response.body).not.toContain('SECRET-JWT')
+    if (code === 'SESSION_EXPIRED') {
+      expect(response.headers['set-cookie']).toMatch(/redeem_session=;/)
+    } else {
+      expect(response.headers['set-cookie']).toBeUndefined()
+    }
+  })
+
+  it('logout clears only the server session cookie', async () => {
+    const { app } = await setup()
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/session/logout',
+      headers: { origin: appOrigin },
+    })
+
+    expect(response.statusCode).toBe(204)
+    expect(response.headers['set-cookie']).toMatch(/redeem_session=;/)
+    expect(response.headers['set-cookie']).toMatch(/Path=\//)
+  })
+})
+
+describe('origin and schemas', () => {
+  it.each([appOrigin, sub2apiOrigin])('accepts the exact allowed origin %s', async (origin) => {
+    const { app } = await setup()
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/session/exchange',
+      headers: { origin },
+      payload: { token: jwt() },
+    })
+    expect(response.statusCode).toBe(200)
+  })
+
+  it.each([undefined, 'null', 'not a url', `${appOrigin}.evil.test`, `${appOrigin}/path`, 'https://user@example.test']) (
+    'rejects missing or unsafe origin %s',
+    async (origin) => {
+      const { app } = await setup()
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/session/exchange',
+        headers: origin === undefined ? {} : { origin },
+        payload: { token: jwt() },
+      })
+      expect(response.statusCode).toBe(403)
+      stableError(response, 'SESSION_INVALID')
+    },
+  )
+
+  it('enforces Origin before resolving an unknown write route', async () => {
+    const { app } = await setup()
+    const response = await app.inject({ method: 'POST', url: '/unknown-write' })
+
+    expect(response.statusCode).toBe(403)
+    stableError(response, 'SESSION_INVALID')
+  })
+
+  it('allows GET health without Origin and exposes no configuration', async () => {
+    const { app } = await setup()
+    const response = await app.inject({ method: 'GET', url: '/healthz' })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toEqual({ status: 'ok' })
+    expect(response.body).not.toMatch(/origin|api|secret|version|dependency/i)
+  })
+
+  it.each([
+    [{ operation_id: 'not-v4', amount: '1' }, 'AMOUNT_INVALID'],
+    [{ operation_id: operationId, amount: 1 }, 'AMOUNT_INVALID'],
+    [{ operation_id: operationId, amount: '1', user_id: 999 }, 'AMOUNT_INVALID'],
+  ])('rejects invalid prepare body %#', async (payload, code) => {
+    const { app } = await setup()
+    const cookie = await cookieFor(app)
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/conversions/prepare',
+      headers: { origin: appOrigin, cookie },
+      payload,
+    })
+
+    expect(response.statusCode).toBe(400)
+    stableError(response, code)
+  })
+
+  it.each([
+    ['/api/session/exchange', { token: jwt(), extra: true }, 'SESSION_INVALID'],
+    ['/api/conversions/execute', { operation_token: '', extra: true }, 'OPERATION_TOKEN_INVALID'],
+  ])('rejects additional or empty fields on %s', async (url, payload, code) => {
+    const { app } = await setup()
+    const headers: Record<string, string> = { origin: appOrigin }
+    if (url.includes('conversions')) headers.cookie = await cookieFor(app)
+    const response = await app.inject({ method: 'POST', url, headers, payload })
+
+    expect(response.statusCode).toBe(400)
+    stableError(response, code)
+  })
+
+  it('rejects an oversized body with a stable safe error', async () => {
+    const { app } = await setup()
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/session/exchange',
+      headers: { origin: appOrigin, 'content-type': 'application/json' },
+      payload: JSON.stringify({ token: 'x'.repeat(17 * 1_024) }),
+    })
+
+    expect(response.statusCode).toBe(413)
+    stableError(response, 'SESSION_INVALID')
+    expect(response.body).not.toContain('xxxx')
+  })
+})
+
+describe('protected conversions', () => {
+  it('prepares with the authenticated session JWT and user ID', async () => {
+    const { app, conversions } = await setup()
+    const userJwt = jwt()
+    const cookie = await cookieFor(app, userJwt)
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/conversions/prepare?user_id=999',
+      headers: { origin: appOrigin, cookie },
+      payload: { operation_id: operationId, amount: '12.50' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(conversions.prepareCalls).toEqual([[userJwt, 7, operationId, '12.50']])
+    expect(response.json()).toEqual({
+      operation_token: 'signed-operation-token',
+      expires_at: '2026-07-13T01:00:00.000Z',
+      amount: '12.50',
+    })
+  })
+
+  it.each([
+    ['pending', 202],
+    ['completed', 200],
+  ] as const)('returns %s execution with the stable status', async (state, status) => {
+    const { app, conversions } = await setup()
+    const cookie = await cookieFor(app)
+    conversions.executeResponse =
+      state === 'pending'
+        ? { status: 'pending', operation_id: operationId, error: 'CONVERSION_PENDING' }
+        : {
+            status: 'completed',
+            operation_id: operationId,
+            amount: '12.5',
+            code: 'REDEEM-SECRET-CODE',
+            created_at: '2026-07-13T00:00:00.000Z',
+          }
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/conversions/execute',
+      headers: { origin: appOrigin, cookie },
+      payload: { operation_token: 'operation-secret-token' },
+    })
+
+    expect(response.statusCode).toBe(status)
+    expect(response.json()).toEqual(conversions.executeResponse)
+    expect(conversions.executeCalls).toEqual([['operation-secret-token', 7]])
+  })
+
+  it.each([
+    [new AppError('AMOUNT_EXCEEDS_BALANCE', 409, 'leaked SECRET-JWT'), 'AMOUNT_EXCEEDS_BALANCE', 409],
+    [new Error('leaked SECRET-JWT operation-secret-token REDEEM-SECRET-CODE'), 'UPSTREAM_UNAVAILABLE', 502],
+  ] as const)('serializes application and unknown failures safely', async (error, code, status) => {
+    const { app, conversions } = await setup()
+    const cookie = await cookieFor(app)
+    conversions.prepareError = error
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/conversions/prepare',
+      headers: { origin: appOrigin, cookie },
+      payload: { operation_id: operationId, amount: '1' },
+    })
+
+    expect(response.statusCode).toBe(status)
+    stableError(response, code)
+    expect(response.body).not.toMatch(/SECRET-JWT|operation-secret-token|REDEEM-SECRET-CODE/)
+  })
+})
+
+describe('security headers, rate limits, and logging', () => {
+  it('sets frame, referrer, and MIME-sniffing protections', async () => {
+    const { app } = await setup()
+    const response = await app.inject({ method: 'GET', url: '/healthz' })
+
+    expect(response.headers['content-security-policy']).toContain("frame-ancestors 'self' https://sub2api.example.test")
+    expect(response.headers['referrer-policy']).toBe('no-referrer')
+    expect(response.headers['x-content-type-options']).toBe('nosniff')
+  })
+
+  it('rate limits exchange independently from prepare and execute', async () => {
+    const { app } = await setup()
+    const cookie = await cookieFor(app)
+    for (let count = 0; count < 5; count += 1) {
+      expect((await exchange(app)).statusCode).toBe(200)
+    }
+    const exchangeLimited = await exchange(app)
+    expect(exchangeLimited.statusCode).toBe(429)
+    stableError(exchangeLimited, 'SESSION_INVALID')
+
+    const prepare = await app.inject({
+      method: 'POST',
+      url: '/api/conversions/prepare',
+      headers: { origin: appOrigin, cookie },
+      payload: { operation_id: operationId, amount: '1' },
+    })
+    const execute = await app.inject({
+      method: 'POST',
+      url: '/api/conversions/execute',
+      headers: { origin: appOrigin, cookie },
+      payload: { operation_token: 'operation-token' },
+    })
+    expect(prepare.statusCode).toBe(200)
+    expect(execute.statusCode).toBe(200)
+  })
+
+  it.each([
+    ['/api/conversions/prepare', { operation_id: operationId, amount: '1' }, 'AMOUNT_INVALID'],
+    ['/api/conversions/execute', { operation_token: 'operation-token' }, 'OPERATION_TOKEN_INVALID'],
+  ])('rate limits authenticated users independently on %s', async (url, payload, code) => {
+    const { app } = await setup()
+    const cookie = await cookieFor(app)
+    for (let count = 0; count < 10; count += 1) {
+      expect(
+        (
+          await app.inject({
+            method: 'POST',
+            url,
+            headers: { origin: appOrigin, cookie },
+            payload,
+          })
+        ).statusCode,
+      ).toBeLessThan(300)
+    }
+    const limited = await app.inject({
+      method: 'POST',
+      url,
+      headers: { origin: appOrigin, cookie },
+      payload,
+    })
+    expect(limited.statusCode).toBe(429)
+    stableError(limited, code)
+  })
+
+  it('redacts credentials and serializes request URLs without query strings', () => {
+    let output = ''
+    const stream = new Writable({
+      write(chunk, _encoding, callback) {
+        output += chunk.toString()
+        callback()
+      },
+    })
+    const options = createLoggerOptions('info', stream)
+    const req = options.serializers!.req!({
+      method: 'GET',
+      url: '/api/me?token=QUERY-SECRET',
+      headers: { authorization: 'Bearer SECRET-JWT', cookie: 'redeem_session=SECRET-COOKIE' },
+    }) as Record<string, unknown>
+    expect(req).toEqual({ method: 'GET', url: '/api/me' })
+    expect(JSON.stringify(options.redact)).toMatch(/authorization|cookie|operation_token|x-api-key|code/i)
+    expect(JSON.stringify(req)).not.toMatch(/QUERY-SECRET|SECRET-JWT|SECRET-COOKIE/)
+    expect(output).not.toMatch(/QUERY-SECRET|SECRET-JWT|SECRET-COOKIE/)
+  })
+})
