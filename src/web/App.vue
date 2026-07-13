@@ -114,7 +114,7 @@ onMounted(() => {
         <div class="tool-grid">
           <ConversionForm
             :balance="conversion.profile.value!.balance"
-            :busy="conversion.busy.value || conversion.pendingOperation.value !== null"
+            :busy="conversion.busy.value || !conversion.storageReady.value || conversion.pendingOperation.value !== null"
             @submit="openConfirmation"
           />
           <ConversionResult

@@ -5,11 +5,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ConversionApi } from '../../src/web/api.js'
 import { ApiClientError, createApiClient } from '../../src/web/api.js'
 import { createUseConversion } from '../../src/web/composables/useConversion.js'
-import type { ConversionStorage } from '../../src/web/storage.js'
+import type { ConversionCoordinator } from '../../src/web/coordinator.js'
+import { browserStorage, loadHistory, type ConversionStorage } from '../../src/web/storage.js'
 import type { HistoryItem, PendingOperation } from '../../src/shared/storage-types.js'
 
 const profile = { id: 7, username: 'alice', balance: '12.50000000' }
 const operationId = '123e4567-e89b-42d3-a456-426614174000'
+
+beforeEach(() => {
+  localStorage.clear()
+  Object.defineProperty(navigator, 'locks', {
+    configurable: true,
+    value: {
+      request: vi.fn().mockImplementation(async (_name, _options, callback) => (
+        callback({ name: 'sub2api-code:conversion:v1', mode: 'exclusive' })
+      )),
+    },
+  })
+})
 
 function api(overrides: Partial<ConversionApi> = {}): ConversionApi {
   return {
@@ -35,14 +48,98 @@ function api(overrides: Partial<ConversionApi> = {}): ConversionApi {
 function storage(
   overrides: Partial<ConversionStorage> = {},
 ): ConversionStorage {
+  let current: PendingOperation | null = null
+  let history: HistoryItem[] = []
+  const customLoadPending = overrides.loadPending
+  const customSavePending = overrides.savePending
+  const customClearPending = overrides.clearPending
+  const customLoadHistory = overrides.loadHistory
+  const customSaveHistory = overrides.saveHistory
+  const customClearHistory = overrides.clearHistory
+  let customPendingSnapshot = customLoadPending !== undefined
   return {
-    loadPending: vi.fn().mockReturnValue(null),
-    savePending: vi.fn().mockReturnValue(true),
-    clearPending: vi.fn().mockReturnValue(true),
-    loadHistory: vi.fn().mockReturnValue([]),
-    saveHistory: vi.fn().mockReturnValue(true),
-    clearHistory: vi.fn().mockReturnValue(true),
-    ...overrides,
+    loadPending: vi.fn().mockImplementation(() => (
+      customPendingSnapshot ? customLoadPending!() : current
+    )),
+    savePending: vi.fn().mockImplementation((value: PendingOperation) => {
+      const saved = customSavePending === undefined ? true : customSavePending(value)
+      if (saved) {
+        current = value
+        customPendingSnapshot = false
+      }
+      return saved
+    }),
+    clearPending: vi.fn().mockImplementation(() => {
+      const cleared = customClearPending === undefined ? true : customClearPending()
+      if (cleared) {
+        current = null
+        customPendingSnapshot = false
+      }
+      return cleared
+    }),
+    loadHistory: vi.fn().mockImplementation(() => (
+      customLoadHistory === undefined ? history : customLoadHistory()
+    )),
+    saveHistory: vi.fn().mockImplementation((value: HistoryItem[]) => {
+      const saved = customSaveHistory === undefined ? true : customSaveHistory(value)
+      if (saved) history = [...value].reverse()
+      return saved
+    }),
+    clearHistory: vi.fn().mockImplementation(() => {
+      const cleared = customClearHistory === undefined ? true : customClearHistory()
+      if (cleared) history = []
+      return cleared
+    }),
+  }
+}
+
+function exclusiveCoordinator(): ConversionCoordinator {
+  let locked = false
+  return {
+    isAvailable: () => true,
+    async runExclusive(work) {
+      if (locked) return 'busy'
+      locked = true
+      try {
+        await work()
+        return 'acquired'
+      } finally {
+        locked = false
+      }
+    },
+  }
+}
+
+function sharedStorage(initial: PendingOperation | null = null): {
+  store: ConversionStorage
+  pending: () => PendingOperation | null
+  replacePending: (value: PendingOperation | null) => void
+  clearPending: ReturnType<typeof vi.fn>
+} {
+  let current = initial
+  let history: HistoryItem[] = []
+  const clearPending = vi.fn().mockImplementation(() => {
+    current = null
+    return true
+  })
+  return {
+    pending: () => current,
+    replacePending: (value) => { current = value },
+    clearPending,
+    store: {
+      loadPending: vi.fn().mockImplementation(() => current),
+      savePending: vi.fn().mockImplementation((value: PendingOperation) => {
+        current = value
+        return true
+      }),
+      clearPending,
+      loadHistory: vi.fn().mockImplementation(() => history),
+      saveHistory: vi.fn().mockImplementation((value: HistoryItem[]) => {
+        history = [...value].reverse()
+        return true
+      }),
+      clearHistory: vi.fn().mockReturnValue(true),
+    },
   }
 }
 
@@ -173,6 +270,235 @@ describe('useConversion initialization', () => {
 
 describe('useConversion conversion', () => {
   afterEach(() => vi.restoreAllMocks())
+
+  it('allows only one controller to create an operation while the cross-page lock is held', async () => {
+    const secondOperationId = '223e4567-e89b-42d3-a456-426614174000'
+    const randomUUID = vi.spyOn(globalThis.crypto, 'randomUUID')
+      .mockReturnValueOnce(operationId)
+      .mockReturnValueOnce(secondOperationId)
+    const shared = sharedStorage()
+    const coordinator = exclusiveCoordinator()
+    let releasePrepare!: () => void
+    let enteredPrepare!: () => void
+    const entered = new Promise<void>((resolve) => { enteredPrepare = resolve })
+    const gate = new Promise<void>((resolve) => { releasePrepare = resolve })
+    const prepareA = vi.fn().mockImplementation(async () => {
+      enteredPrepare()
+      await gate
+      return { operation_token: 'secret-a', expires_at: '2099-07-13T01:00:00.000Z', amount: '1' }
+    })
+    const prepareB = vi.fn().mockResolvedValue({
+      operation_token: 'secret-b', expires_at: '2099-07-13T01:00:00.000Z', amount: '2',
+    })
+    const conversionA = createUseConversion(api({
+      prepare: prepareA,
+      execute: vi.fn().mockResolvedValue({
+        status: 'pending', operation_id: operationId, error: 'CONVERSION_PENDING',
+      }),
+    }), shared.store, coordinator)
+    const conversionB = createUseConversion(api({ prepare: prepareB }), shared.store, coordinator)
+
+    const runningA = conversionA.convert('1')
+    await entered
+    await conversionB.convert('2')
+
+    expect(randomUUID).toHaveBeenCalledTimes(1)
+    expect(prepareB).not.toHaveBeenCalled()
+    expect(shared.pending()).toMatchObject({ operation_id: operationId, state: 'preparing' })
+    expect(conversionB.error.value).toMatchObject({ code: 'CONVERSION_IN_PROGRESS' })
+
+    releasePrepare()
+    await runningA
+  })
+
+  it('allows only one controller to resume the same shared token', async () => {
+    const ready: PendingOperation = {
+      version: 1, operation_id: operationId, amount: '1', state: 'ready',
+      operation_token: 'shared-secret', expires_at: '2099-07-13T01:00:00.000Z',
+    }
+    const shared = sharedStorage(ready)
+    const coordinator = exclusiveCoordinator()
+    let releaseExecute!: () => void
+    let enteredExecute!: () => void
+    const entered = new Promise<void>((resolve) => { enteredExecute = resolve })
+    const gate = new Promise<void>((resolve) => { releaseExecute = resolve })
+    const executeA = vi.fn().mockImplementation(async () => {
+      enteredExecute()
+      await gate
+      return { status: 'pending', operation_id: operationId, error: 'CONVERSION_PENDING' }
+    })
+    const executeB = vi.fn()
+    const conversionA = createUseConversion(api({ execute: executeA }), shared.store, coordinator)
+    const conversionB = createUseConversion(api({ execute: executeB }), shared.store, coordinator)
+    await conversionA.initialize()
+    await conversionB.initialize()
+
+    const runningA = conversionA.resumePending()
+    await entered
+    await conversionB.resumePending()
+
+    expect(executeA).toHaveBeenCalledTimes(1)
+    expect(executeB).not.toHaveBeenCalled()
+    expect(conversionB.error.value).toMatchObject({ code: 'CONVERSION_IN_PROGRESS' })
+
+    releaseExecute()
+    await runningA
+  })
+
+  it('does not overwrite a newer shared operation while downgrading expired recovery', async () => {
+    const expired: PendingOperation = {
+      version: 1, operation_id: operationId, amount: '1', state: 'ready',
+      operation_token: 'old-secret', expires_at: '2020-07-13T01:00:00.000Z',
+    }
+    const replacement: PendingOperation = {
+      version: 1, operation_id: 'new-operation', amount: '2', state: 'preparing',
+    }
+    const shared = sharedStorage(expired)
+    const coordinator: ConversionCoordinator = {
+      isAvailable: () => true,
+      async runExclusive(work) {
+        shared.replacePending(replacement)
+        await work()
+        return 'acquired'
+      },
+    }
+    const conversion = createUseConversion(api(), shared.store, coordinator)
+
+    await conversion.initialize()
+
+    expect(shared.store.savePending).not.toHaveBeenCalled()
+    expect(shared.pending()).toEqual(replacement)
+    expect(conversion.pendingOperation.value).toEqual(replacement)
+    expect(conversion.storageReady.value).toBe(true)
+  })
+
+  it('does not downgrade expired recovery while the cross-page lock is busy', async () => {
+    const expired: PendingOperation = {
+      version: 1, operation_id: operationId, amount: '1', state: 'ready',
+      operation_token: 'old-secret', expires_at: '2020-07-13T01:00:00.000Z',
+    }
+    const shared = sharedStorage(expired)
+    const coordinator: ConversionCoordinator = {
+      isAvailable: () => true,
+      runExclusive: vi.fn().mockResolvedValue('busy'),
+    }
+    const prepare = vi.fn()
+    const conversion = createUseConversion(api({ prepare }), shared.store, coordinator)
+
+    await conversion.initialize()
+    await conversion.convert('2')
+
+    expect(shared.store.savePending).not.toHaveBeenCalled()
+    expect(shared.pending()).toEqual(expired)
+    expect(conversion.pendingOperation.value).toEqual(expired)
+    expect(conversion.storageReady.value).toBe(false)
+    expect(conversion.error.value).toMatchObject({ code: 'CONVERSION_IN_PROGRESS' })
+    expect(prepare).not.toHaveBeenCalled()
+  })
+
+  it('fails closed without Web Locks support', async () => {
+    const randomUUID = vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(operationId)
+    const prepare = vi.fn()
+    const unavailable: ConversionCoordinator = {
+      isAvailable: () => false,
+      runExclusive: vi.fn().mockResolvedValue('unavailable'),
+    }
+    const conversion = createUseConversion(api({ prepare }), storage(), unavailable)
+
+    await conversion.convert('1')
+
+    expect(randomUUID).not.toHaveBeenCalled()
+    expect(prepare).not.toHaveBeenCalled()
+    expect(conversion.error.value).toMatchObject({ code: 'MANUAL_REVIEW_REQUIRED' })
+  })
+
+  it('requires an explicit refresh after hydration storage access fails', async () => {
+    const existing: PendingOperation = {
+      version: 1, operation_id: 'existing-operation', amount: '1', state: 'preparing',
+    }
+    const randomUUID = vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(operationId)
+    const prepare = vi.fn()
+    const savePending = vi.fn().mockReturnValue(true)
+    const loadPending = vi.fn()
+      .mockImplementationOnce(() => { throw new Error('storage blocked') })
+      .mockReturnValue(existing)
+    const conversion = createUseConversion(api({ prepare }), storage({
+      loadPending,
+      savePending,
+    }), exclusiveCoordinator())
+
+    await conversion.initialize()
+    expect(conversion.storageReady.value).toBe(false)
+    await conversion.convert('2')
+
+    expect(randomUUID).not.toHaveBeenCalled()
+    expect(prepare).not.toHaveBeenCalled()
+    expect(savePending).not.toHaveBeenCalled()
+    expect(loadPending).toHaveBeenCalledTimes(1)
+    expect(conversion.pendingOperation.value).toBeNull()
+    expect(conversion.error.value).toMatchObject({
+      code: 'MANUAL_REVIEW_REQUIRED', message: '无法保存本地恢复信息，请稍后重试',
+    })
+
+    await conversion.refresh()
+    await conversion.convert('2')
+
+    expect(randomUUID).not.toHaveBeenCalled()
+    expect(prepare).not.toHaveBeenCalled()
+    expect(savePending).not.toHaveBeenCalled()
+    expect(conversion.pendingOperation.value).toEqual(existing)
+    expect(conversion.storageReady.value).toBe(true)
+    expect(conversion.error.value).toMatchObject({ code: 'CONVERSION_IN_PROGRESS' })
+  })
+
+  it('fails closed when shared pending cannot be read inside the lock', async () => {
+    const randomUUID = vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(operationId)
+    const prepare = vi.fn()
+    const savePending = vi.fn().mockReturnValue(true)
+    const conversion = createUseConversion(api({ prepare }), storage({
+      loadPending: vi.fn().mockImplementation(() => { throw new Error('storage blocked') }),
+      savePending,
+    }), exclusiveCoordinator())
+
+    await conversion.convert('1')
+
+    expect(randomUUID).not.toHaveBeenCalled()
+    expect(prepare).not.toHaveBeenCalled()
+    expect(savePending).not.toHaveBeenCalled()
+    expect(conversion.storageReady.value).toBe(false)
+    expect(conversion.error.value).toMatchObject({
+      code: 'MANUAL_REVIEW_REQUIRED', message: '无法保存本地恢复信息，请稍后重试',
+    })
+  })
+
+  it('does not clear a different operation that appears before completed cleanup', async () => {
+    const ready: PendingOperation = {
+      version: 1, operation_id: operationId, amount: '1', state: 'ready',
+      operation_token: 'shared-secret', expires_at: '2099-07-13T01:00:00.000Z',
+    }
+    const replacement: PendingOperation = {
+      version: 1, operation_id: 'other-operation', amount: '2', state: 'preparing',
+    }
+    const shared = sharedStorage(ready)
+    shared.store.saveHistory = vi.fn().mockImplementation(() => {
+      shared.replacePending(replacement)
+      return true
+    })
+    const conversion = createUseConversion(api({
+      execute: vi.fn().mockResolvedValue({
+        status: 'completed', operation_id: operationId, amount: '1', code: 'CODE-A',
+        created_at: 'upstream-time-value',
+      }),
+    }), shared.store, exclusiveCoordinator())
+    await conversion.initialize()
+
+    await conversion.resumePending()
+
+    expect(shared.clearPending).not.toHaveBeenCalled()
+    expect(shared.pending()).toEqual(replacement)
+    expect(conversion.pendingOperation.value).toEqual(replacement)
+    expect(conversion.error.value).toMatchObject({ code: 'MANUAL_REVIEW_REQUIRED' })
+  })
 
   it('creates an operation UUID only after confirmation, prepares, executes, and saves completion', async () => {
     const calls: string[] = []
@@ -387,6 +713,33 @@ describe('useConversion conversion', () => {
     expect(conversion.pendingOperation.value).toEqual(saved.at(-1))
   })
 
+  it('turns a pending MANUAL_REVIEW_REQUIRED response into tokenless manual review', async () => {
+    vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(operationId)
+    const shared = sharedStorage()
+    const execute = vi.fn().mockResolvedValue({
+      status: 'pending', operation_id: operationId, error: 'MANUAL_REVIEW_REQUIRED',
+    })
+    const conversion = createUseConversion(api({
+      prepare: vi.fn().mockResolvedValue({
+        operation_token: 'must-be-removed', expires_at: '2099-07-13T01:00:00.000Z', amount: '1',
+      }),
+      execute,
+    }), shared.store, exclusiveCoordinator())
+
+    await conversion.convert('1')
+    await conversion.resumePending()
+
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(shared.pending()).toEqual({
+      version: 1, operation_id: operationId, amount: '1', state: 'expired',
+      expires_at: '2099-07-13T01:00:00.000Z',
+    })
+    expect(conversion.pendingOperation.value).toEqual(shared.pending())
+    expect(conversion.pendingOperation.value).not.toHaveProperty('operation_token')
+    expect(conversion.result.value).toBeNull()
+    expect(conversion.error.value).toMatchObject({ code: 'MANUAL_REVIEW_REQUIRED' })
+  })
+
   it('clears a previous code after the next persisted operation has an uncertain execute failure', async () => {
     const secondOperationId = '223e4567-e89b-42d3-a456-426614174000'
     vi.spyOn(globalThis.crypto, 'randomUUID')
@@ -496,9 +849,8 @@ describe('useConversion conversion', () => {
       .mockReturnValue('223e4567-e89b-42d3-a456-426614174000')
     const prepare = vi.fn()
     const execute = vi.fn()
-    const store = storage()
+    const store = storage({ loadPending: vi.fn().mockReturnValue(existing) })
     const conversion = createUseConversion(api({ prepare, execute }), store)
-    conversion.pendingOperation.value = existing
 
     await conversion.convert('2')
 
@@ -543,14 +895,16 @@ describe('useConversion conversion', () => {
     const execute = vi.fn().mockResolvedValue({
       status: 'pending', operation_id: operationId, error: 'CONVERSION_PENDING',
     })
-    const conversion = createUseConversion(api({ prepare, execute }), storage({
+    const store = storage({
       loadPending: vi.fn().mockReturnValue(ready),
-    }))
+    })
+    const conversion = createUseConversion(api({ prepare, execute }), store)
     await conversion.initialize()
 
     await conversion.resumePending()
 
     expect(prepare).not.toHaveBeenCalled()
+    expect(store.savePending).toHaveBeenNthCalledWith(1, ready)
     expect(execute).toHaveBeenCalledWith({ operation_token: 'stored-operation-secret' })
     expect(randomUUID).not.toHaveBeenCalled()
   })
@@ -600,9 +954,11 @@ describe('useConversion conversion', () => {
     const savePending = vi.fn()
       .mockReturnValueOnce(false)
       .mockReturnValue(true)
+    const clearPending = vi.fn().mockReturnValue(true)
     const conversion = createUseConversion(api({ prepare }), storage({
       loadPending: vi.fn().mockReturnValue(ready),
       savePending,
+      clearPending,
     }))
 
     await conversion.initialize()
@@ -621,7 +977,9 @@ describe('useConversion conversion', () => {
 
     expect(randomUUID).not.toHaveBeenCalled()
     expect(prepare).not.toHaveBeenCalled()
-    expect(savePending).toHaveBeenCalledTimes(1)
+    expect(clearPending).toHaveBeenCalledTimes(1)
+    expect(savePending).toHaveBeenCalledTimes(2)
+    expect(savePending).toHaveBeenLastCalledWith(conversion.pendingOperation.value)
   })
 
   it('clears a terminated operation and never executes it again on resume', async () => {
@@ -745,7 +1103,7 @@ describe('useConversion conversion', () => {
     )
     const conversion = createUseConversion(api({ execute }), storage({
       loadPending: vi.fn().mockReturnValue(ready),
-      savePending: vi.fn().mockReturnValue(false),
+      savePending: vi.fn().mockReturnValueOnce(true).mockReturnValue(false),
     }))
     await conversion.initialize()
 
@@ -761,6 +1119,58 @@ describe('useConversion conversion', () => {
       expires_at: '2099-07-13T01:00:00.000Z',
     })
     expect(conversion.error.value).toMatchObject({
+      code: 'MANUAL_REVIEW_REQUIRED',
+      message: '无法保存本地恢复信息，请稍后重试',
+    })
+  })
+
+  it('does not revive a manual-review token when downgrade save and clear both fail', async () => {
+    const ready: PendingOperation = {
+      version: 1,
+      operation_id: operationId,
+      amount: '1',
+      state: 'ready',
+      operation_token: 'must-not-revive',
+      expires_at: '2099-07-13T01:00:00.000Z',
+    }
+    let current: PendingOperation | null = ready
+    let writes = 0
+    const savePending = vi.fn().mockImplementation((value: PendingOperation) => {
+      writes += 1
+      if (writes !== 1) return false
+      current = value
+      return true
+    })
+    const clearPending = vi.fn().mockReturnValue(false)
+    const store: ConversionStorage = {
+      loadPending: vi.fn().mockImplementation(() => current),
+      savePending,
+      clearPending,
+      loadHistory: vi.fn().mockReturnValue([]),
+      saveHistory: vi.fn().mockReturnValue(true),
+      clearHistory: vi.fn().mockReturnValue(true),
+    }
+    const execute = vi.fn().mockRejectedValue(
+      new ApiClientError('MANUAL_REVIEW_REQUIRED', 409, 'request-review'),
+    )
+    const first = createUseConversion(api({ execute }), store)
+    await first.initialize()
+
+    await first.resumePending()
+
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(clearPending).toHaveBeenCalledTimes(1)
+    expect(current).toEqual(ready)
+    expect(first.storageReady.value).toBe(false)
+
+    const second = createUseConversion(api({ execute }), store)
+    await second.initialize()
+    await second.resumePending()
+
+    expect(savePending).toHaveBeenLastCalledWith(ready)
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(second.storageReady.value).toBe(false)
+    expect(second.error.value).toMatchObject({
       code: 'MANUAL_REVIEW_REQUIRED',
       message: '无法保存本地恢复信息，请稍后重试',
     })
@@ -787,6 +1197,55 @@ describe('useConversion conversion', () => {
     expect(clearPending).not.toHaveBeenCalled()
     expect(conversion.pendingOperation.value?.operation_id).toBe(operationId)
     expect(conversion.result.value).toBeNull()
+  })
+
+  it('does not clear pending when completed history cannot be read', async () => {
+    vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(operationId)
+    const clearPending = vi.fn()
+    const conversion = createUseConversion(api({
+      prepare: vi.fn().mockResolvedValue({
+        operation_token: 'operation-secret', expires_at: '2099-07-13T01:00:00.000Z', amount: '1',
+      }),
+      execute: vi.fn().mockResolvedValue({
+        status: 'completed', operation_id: operationId, amount: '1', code: 'CODE-123',
+        created_at: 'upstream-time-value',
+      }),
+    }), storage({
+      loadHistory: vi.fn().mockImplementation(() => { throw new Error('storage blocked') }),
+      clearPending,
+    }), exclusiveCoordinator())
+
+    await conversion.convert('1')
+
+    expect(clearPending).not.toHaveBeenCalled()
+    expect(conversion.pendingOperation.value).toMatchObject({ operation_id: operationId, state: 'ready' })
+    expect(conversion.result.value).toBeNull()
+    expect(conversion.error.value).toMatchObject({
+      code: 'MANUAL_REVIEW_REQUIRED', message: '无法保存本地恢复信息，请稍后重试',
+    })
+  })
+
+  it('persists and completes a code with an unparseable display timestamp', async () => {
+    localStorage.clear()
+    vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(operationId)
+    const conversion = createUseConversion(api({
+      prepare: vi.fn().mockResolvedValue({
+        operation_token: 'operation-secret', expires_at: '2099-07-13T01:00:00.000Z', amount: '1',
+      }),
+      execute: vi.fn().mockResolvedValue({
+        status: 'completed', operation_id: operationId, amount: '1', code: 'CODE-UPSTREAM',
+        created_at: 'upstream-time-value',
+      }),
+    }), browserStorage, exclusiveCoordinator())
+
+    await conversion.convert('1')
+
+    expect(conversion.result.value?.code).toBe('CODE-UPSTREAM')
+    expect(loadHistory()).toEqual([{
+      version: 1, operation_id: operationId, amount: '1', code: 'CODE-UPSTREAM',
+      created_at: 'upstream-time-value',
+    }])
+    expect(conversion.pendingOperation.value).toBeNull()
   })
 
   it('stores a pending response without a code and does not expose a previous completion', async () => {

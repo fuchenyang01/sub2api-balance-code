@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { HistoryItem, PendingOperation } from '../../src/shared/storage-types.js'
 import {
@@ -11,6 +11,7 @@ import {
   loadPending,
   saveHistory,
   savePending,
+  StorageAccessError,
 } from '../../src/web/storage.js'
 
 function historyItem(index: number): HistoryItem {
@@ -126,14 +127,16 @@ describe('versioned local storage', () => {
     ])
   })
 
-  it('removes all history when a record has an unparseable created_at', () => {
+  it('keeps an unparseable created_at because history timestamps are display-only', () => {
     localStorage.setItem(HISTORY_KEY, JSON.stringify([
       historyItem(1),
       { ...historyItem(2), created_at: 'not-a-date' },
     ]))
 
-    expect(loadHistory()).toEqual([])
-    expect(localStorage.getItem(HISTORY_KEY)).toBeNull()
+    expect(loadHistory()).toEqual([
+      historyItem(1),
+      { ...historyItem(2), created_at: 'not-a-date' },
+    ])
   })
 
   it('accepts a parseable non-ISO history timestamp from the service contract', () => {
@@ -141,6 +144,23 @@ describe('versioned local storage', () => {
 
     expect(saveHistory([item])).toBe(true)
     expect(loadHistory()).toEqual([item])
+  })
+
+  it('accepts bounded upstream display timestamps and rejects empty or overlong values', () => {
+    const upstream = { ...historyItem(1), created_at: 'upstream-time-value' }
+    expect(saveHistory([upstream])).toBe(true)
+    expect(loadHistory()).toEqual([upstream])
+
+    expect(saveHistory([{ ...historyItem(2), created_at: '' }])).toBe(false)
+    expect(saveHistory([{ ...historyItem(2), created_at: 'x'.repeat(129) }])).toBe(false)
+  })
+
+  it('throws a recognizable error when localStorage cannot be read', () => {
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new DOMException('blocked', 'SecurityError')
+    })
+
+    expect(() => loadPending()).toThrow(StorageAccessError)
   })
 
   it('clears history only through the explicit clear operation', () => {

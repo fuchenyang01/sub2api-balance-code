@@ -5,6 +5,13 @@ export const HISTORY_KEY = 'sub2api-code:history:v1'
 
 const HISTORY_LIMIT = 100
 
+export class StorageAccessError extends Error {
+  constructor() {
+    super('Local storage is unavailable')
+    this.name = 'StorageAccessError'
+  }
+}
+
 export interface ConversionStorage {
   loadPending(): PendingOperation | null
   savePending(pending: PendingOperation): boolean
@@ -25,6 +32,10 @@ function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): b
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0
+}
+
+function isBoundedString(value: unknown, maxLength: number): value is string {
+  return isNonEmptyString(value) && value.length <= maxLength
 }
 
 function isPositiveAmount(value: unknown): value is string {
@@ -91,7 +102,7 @@ function parseHistoryItem(value: unknown): HistoryItem | null {
     || !isNonEmptyString(value.operation_id)
     || !isPositiveAmount(value.amount)
     || !isNonEmptyString(value.code)
-    || !isDate(value.created_at)) return null
+    || !isBoundedString(value.created_at, 128)) return null
   return {
     version: 1,
     operation_id: value.operation_id,
@@ -111,11 +122,17 @@ function remove(key: string): boolean {
 }
 
 function read(key: string): unknown | undefined {
+  let stored: string | null
   try {
-    const stored = localStorage.getItem(key)
-    return stored === null ? undefined : JSON.parse(stored)
+    stored = localStorage.getItem(key)
   } catch {
-    remove(key)
+    throw new StorageAccessError()
+  }
+  if (stored === null) return undefined
+  try {
+    return JSON.parse(stored)
+  } catch {
+    if (!remove(key)) throw new StorageAccessError()
     return undefined
   }
 }
@@ -133,7 +150,7 @@ export function loadPending(): PendingOperation | null {
   const raw = read(PENDING_KEY)
   if (raw === undefined) return null
   const pending = parsePending(raw)
-  if (pending === null) remove(PENDING_KEY)
+  if (pending === null && !remove(PENDING_KEY)) throw new StorageAccessError()
   return pending
 }
 
@@ -166,7 +183,7 @@ export function loadHistory(): HistoryItem[] {
   if (raw === undefined) return []
   const history = normalizeStoredHistory(raw)
   if (history === null) {
-    remove(HISTORY_KEY)
+    if (!remove(HISTORY_KEY)) throw new StorageAccessError()
     return []
   }
   if (JSON.stringify(history) !== JSON.stringify(raw)) write(HISTORY_KEY, history)

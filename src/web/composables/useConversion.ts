@@ -4,6 +4,7 @@ import { ref, type Ref } from 'vue'
 import type { ErrorCode, ExecuteResponse, MeResponse } from '../../shared/contracts.js'
 import type { ExecutableOperation, HistoryItem, PendingOperation } from '../../shared/storage-types.js'
 import { ApiClientError, apiClient, type ConversionApi } from '../api.js'
+import { browserCoordinator, type ConversionCoordinator } from '../coordinator.js'
 import { browserStorage, type ConversionStorage } from '../storage.js'
 
 type CompletedResult = Extract<ExecuteResponse, { status: 'completed' }>
@@ -27,6 +28,7 @@ export interface ConversionController {
   error: Ref<ConversionError | null>
   loading: Ref<boolean>
   busy: Ref<boolean>
+  storageReady: Ref<boolean>
   initialize(): Promise<void>
   refresh(): Promise<void>
   logout(): Promise<void>
@@ -143,6 +145,24 @@ function storageFailure(): ConversionError {
   }
 }
 
+function coordinationFailure(): ConversionError {
+  return {
+    code: 'MANUAL_REVIEW_REQUIRED',
+    message: '当前浏览器无法安全协调兑换操作',
+    requestId: '',
+    retryable: false,
+  }
+}
+
+function conversionInProgress(): ConversionError {
+  return {
+    code: 'CONVERSION_IN_PROGRESS',
+    message: '另一个页面正在处理兑换',
+    requestId: '',
+    retryable: true,
+  }
+}
+
 function isExpired(operation: ExecutableOperation): boolean {
   return Date.parse(operation.expires_at) <= Date.now()
 }
@@ -150,6 +170,7 @@ function isExpired(operation: ExecutableOperation): boolean {
 export function createUseConversion(
   api: ConversionApi,
   storage: ConversionStorage = browserStorage,
+  coordinator: ConversionCoordinator = browserCoordinator,
 ): ConversionController {
   const session = ref<SessionState>('loading')
   const profile = ref<MeResponse | null>(null)
@@ -160,11 +181,32 @@ export function createUseConversion(
   const error = ref<ConversionError | null>(null)
   const loading = ref(false)
   const busy = ref(false)
+  const storageReady = ref(false)
   let initialization: Promise<void> | null = null
   let pendingExchangeToken: string | null = null
+  let safetyFailureActive = false
 
   function failStorage(): void {
+    storageReady.value = false
+    safetyFailureActive = true
     error.value = storageFailure()
+  }
+
+  function failCoordination(): void {
+    storageReady.value = false
+    safetyFailureActive = true
+    error.value = coordinationFailure()
+  }
+
+  function failCoordinationBusy(): void {
+    storageReady.value = false
+    safetyFailureActive = true
+    error.value = conversionInProgress()
+  }
+
+  function markStorageReady(): void {
+    storageReady.value = true
+    safetyFailureActive = false
   }
 
   function persistPending(value: PendingOperation): boolean {
@@ -199,6 +241,7 @@ export function createUseConversion(
     const expired = toManualReview(value)
     pendingOperation.value = expired
     if (!storage.savePending(expired)) {
+      if (storage.clearPending()) storage.savePending(expired)
       failStorage()
       return
     }
@@ -210,14 +253,61 @@ export function createUseConversion(
     }
   }
 
-  function hydrateLocalState(): void {
-    conversionHistory.value = storage.loadHistory()
-    const stored = storage.loadPending()
-    if (stored !== null && (stored.state === 'ready' || stored.state === 'pending') && isExpired(stored)) {
-      expirePending(stored)
-      return
+  async function hydrateLocalState(): Promise<void> {
+    try {
+      conversionHistory.value = storage.loadHistory()
+      const stored = storage.loadPending()
+      pendingOperation.value = stored
+      if (!coordinator.isAvailable()) {
+        failCoordination()
+        return
+      }
+      if (stored !== null && (stored.state === 'ready' || stored.state === 'pending') && isExpired(stored)) {
+        const coordination = await coordinator.runExclusive(async () => {
+          const shared = loadSharedPending()
+          if (shared === undefined
+            || shared === null
+            || shared.operation_id !== stored.operation_id) return
+          if ((shared.state === 'ready' || shared.state === 'pending') && isExpired(shared)) {
+            expirePending(shared)
+          }
+        })
+        if (coordination === 'busy') failCoordinationBusy()
+        else if (coordination === 'unavailable') failCoordination()
+        return
+      }
+      markStorageReady()
+    } catch {
+      pendingOperation.value = null
+      failStorage()
     }
-    pendingOperation.value = stored
+  }
+
+  function loadSharedPending(): PendingOperation | null | undefined {
+    try {
+      const stored = storage.loadPending()
+      pendingOperation.value = stored
+      markStorageReady()
+      return stored
+    } catch {
+      failStorage()
+      return undefined
+    }
+  }
+
+  function clearCompletedPending(operationId: string): boolean {
+    const stored = loadSharedPending()
+    if (stored === undefined) return false
+    if (stored === null || stored.operation_id !== operationId) {
+      error.value = {
+        code: 'MANUAL_REVIEW_REQUIRED',
+        message: '共享恢复状态已变更，请管理员核对',
+        requestId: '',
+        retryable: false,
+      }
+      return false
+    }
+    return clearPendingRecovery()
   }
 
   async function loadProfile(): Promise<void> {
@@ -227,7 +317,6 @@ export function createUseConversion(
 
   function handleError(caught: unknown): void {
     const safeError = toConversionError(caught)
-    error.value = safeError
     if (sessionCodes.has(safeError.code)) {
       pendingExchangeToken = null
       session.value = 'expired'
@@ -235,6 +324,7 @@ export function createUseConversion(
     } else if (session.value === 'loading') {
       session.value = 'error'
     }
+    if (!safetyFailureActive) error.value = safeError
   }
 
   function initialize(): Promise<void> {
@@ -242,7 +332,7 @@ export function createUseConversion(
     initialization = (async () => {
       loading.value = true
       error.value = null
-      hydrateLocalState()
+      await hydrateLocalState()
       const url = new URL(window.location.href)
       applyUrlPreferences(url)
       const token = url.searchParams.get('token')
@@ -270,6 +360,7 @@ export function createUseConversion(
     busy.value = true
     error.value = null
     try {
+      await hydrateLocalState()
       if (pendingExchangeToken !== null) {
         await api.exchange(pendingExchangeToken)
         pendingExchangeToken = null
@@ -305,7 +396,14 @@ export function createUseConversion(
       code: response.code,
       created_at: response.created_at,
     }
-    const currentHistory = storage.loadHistory()
+    let currentHistory: HistoryItem[]
+    try {
+      currentHistory = storage.loadHistory()
+      markStorageReady()
+    } catch {
+      failStorage()
+      return false
+    }
     const chronological = [...currentHistory].reverse()
     chronological.push(item)
     if (!storage.saveHistory(chronological)) {
@@ -330,11 +428,16 @@ export function createUseConversion(
       if (response.status === 'completed') {
         if (!amountsEqual(response.amount, operation.amount)) throw conversionConflict()
         if (!publishHistory(response)) return
-        if (storage.clearPending()) pendingOperation.value = null
-        else failStorage()
+        if (!clearCompletedPending(operation.operation_id)) return
         result.value = response
         pending.value = null
       } else {
+        if (response.error === 'MANUAL_REVIEW_REQUIRED') {
+          expirePending(operation)
+          pending.value = null
+          result.value = null
+          return
+        }
         const next: PendingOperation = { ...operation, state: 'pending' }
         persistPending(next)
         pending.value = {
@@ -390,22 +493,36 @@ export function createUseConversion(
   }
 
   async function convert(rawAmount: string): Promise<void> {
-    if (busy.value || pendingOperation.value !== null) return
+    if (busy.value || safetyFailureActive || pendingOperation.value?.state === 'expired') return
     busy.value = true
     error.value = null
     try {
-      const amount = normalizeAmount(rawAmount)
-      const operationId = crypto.randomUUID()
-      const operation: PendingOperation = {
-        version: 1,
-        operation_id: operationId,
-        amount,
-        state: 'preparing',
-      }
-      if (!persistPending(operation)) return
-      result.value = null
-      pending.value = null
-      await prepareAndExecute(operation)
+      const coordination = await coordinator.runExclusive(async () => {
+        const shared = loadSharedPending()
+        if (shared === undefined) return
+        if (shared !== null) {
+          if ((shared.state === 'ready' || shared.state === 'pending') && isExpired(shared)) {
+            expirePending(shared)
+          } else {
+            error.value = conversionInProgress()
+          }
+          return
+        }
+        const amount = normalizeAmount(rawAmount)
+        const operationId = crypto.randomUUID()
+        const operation: PendingOperation = {
+          version: 1,
+          operation_id: operationId,
+          amount,
+          state: 'preparing',
+        }
+        if (!persistPending(operation)) return
+        result.value = null
+        pending.value = null
+        await prepareAndExecute(operation)
+      })
+      if (coordination === 'busy') error.value = conversionInProgress()
+      else if (coordination === 'unavailable') failCoordination()
     } catch (caught) {
       handleError(caught)
     } finally {
@@ -414,18 +531,26 @@ export function createUseConversion(
   }
 
   async function resumePending(): Promise<void> {
-    const operation = pendingOperation.value
-    if (busy.value || operation === null || operation.state === 'expired') return
+    if (busy.value || safetyFailureActive || pendingOperation.value?.state === 'expired') return
     busy.value = true
-    error.value = null
-    result.value = null
-    pending.value = null
     try {
-      if (operation.state === 'preparing') {
-        await prepareAndExecute(operation)
-      } else {
-        await executePrepared(operation)
-      }
+      const coordination = await coordinator.runExclusive(async () => {
+        const operation = loadSharedPending()
+        if (operation === undefined || operation === null || operation.state === 'expired') return
+        error.value = null
+        result.value = null
+        pending.value = null
+        if ((operation.state === 'ready' || operation.state === 'pending') && isExpired(operation)) {
+          expirePending(operation)
+        } else if (operation.state === 'preparing') {
+          await prepareAndExecute(operation)
+        } else {
+          if (!persistPending(operation)) return
+          await executePrepared(operation)
+        }
+      })
+      if (coordination === 'busy') error.value = conversionInProgress()
+      else if (coordination === 'unavailable') failCoordination()
     } finally {
       busy.value = false
     }
@@ -446,6 +571,7 @@ export function createUseConversion(
     error,
     loading,
     busy,
+    storageReady,
     initialize,
     refresh,
     logout,

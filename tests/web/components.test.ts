@@ -19,6 +19,7 @@ const appController = vi.hoisted((): {
   pendingOperation: null | Record<string, unknown>
   result: null | Record<string, unknown>
   history: Record<string, unknown>[]
+  storageReady: boolean
 } => ({
   session: 'authenticated',
   error: null,
@@ -30,6 +31,7 @@ const appController = vi.hoisted((): {
   pendingOperation: null,
   result: null,
   history: [],
+  storageReady: true,
 }))
 
 vi.mock('../../src/web/composables/useConversion.js', async (importOriginal) => {
@@ -47,6 +49,7 @@ vi.mock('../../src/web/composables/useConversion.js', async (importOriginal) => 
       error: ref(appController.error),
       loading: ref(false),
       busy: ref(false),
+      storageReady: ref(appController.storageReady),
       initialize: appController.initialize,
       refresh: appController.refresh,
       logout: vi.fn(),
@@ -409,5 +412,16 @@ describe('App', () => {
     wrapper.unmount()
     appController.result = null
     appController.pendingOperation = null
+  })
+
+  it('disables conversion while shared storage safety is unconfirmed', async () => {
+    appController.storageReady = false
+    const wrapper = mount(App)
+    await wrapper.get('input').setValue('1')
+
+    expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeDefined()
+
+    wrapper.unmount()
+    appController.storageReady = true
   })
 })
