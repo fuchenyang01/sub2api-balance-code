@@ -18,6 +18,7 @@ export interface MockSub2Api {
   readonly origin: string
   readonly userToken: string
   setMode(mode: MockMode): void
+  setIframeChildUrl(url: string): void
   totalSuccessfulDebits(): number
   close(): Promise<void>
 }
@@ -71,6 +72,8 @@ export async function startMockSub2Api(): Promise<MockSub2Api> {
   let balance = 100
   let nextCodeId = 1
   let successfulDebits = 0
+  let iframeChildUrl: string | null = null
+  let closing: Promise<void> | null = null
   const userToken = createTestJwt()
   const codes = new Map<number, RedeemCode>()
   const generated = new Map<string, RedeemCode>()
@@ -85,6 +88,18 @@ export async function startMockSub2Api(): Promise<MockSub2Api> {
 
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? '/', 'http://mock.local')
+    if (request.method === 'GET' && url.pathname === '/e2e-parent') {
+      if (iframeChildUrl === null) {
+        json(response, 503, { code: 1, message: 'iframe child is not configured' })
+        return
+      }
+      const escapedChildUrl = iframeChildUrl
+        .replaceAll('&', '&amp;')
+        .replaceAll('"', '&quot;')
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+      response.end(`<!doctype html><html><body style="margin:0"><iframe id="tool-frame" title="余额兑换工具" src="${escapedChildUrl}" style="width:100%;height:780px;border:0"></iframe></body></html>`)
+      return
+    }
     if (request.method === 'GET' && url.pathname === '/api/v1/user/profile') {
       if (request.headers.authorization !== `Bearer ${userToken}`) {
         json(response, 401, { code: 401, message: 'invalid user token' })
@@ -203,14 +218,19 @@ export async function startMockSub2Api(): Promise<MockSub2Api> {
     origin,
     userToken,
     setMode: (nextMode) => { mode = nextMode },
+    setIframeChildUrl: (url) => { iframeChildUrl = url },
     totalSuccessfulDebits: () => successfulDebits,
-    close: async () => {
-      await closeServer(server)
-      codes.clear()
-      generated.clear()
-      debits.clear()
-      balance = 100
-      successfulDebits = 0
+    close: () => {
+      closing ??= (async () => {
+        await closeServer(server)
+        codes.clear()
+        generated.clear()
+        debits.clear()
+        balance = 100
+        successfulDebits = 0
+        iframeChildUrl = null
+      })()
+      return closing
     },
   }
 }

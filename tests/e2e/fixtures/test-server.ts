@@ -2,6 +2,7 @@ import { once } from 'node:events'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { test as base } from '@playwright/test'
 
@@ -20,8 +21,24 @@ export interface TestEnvironment {
   iframeParentUrl(): string
 }
 
+export interface TestAppCandidate {
+  app: {
+    listen(options: { host: string; port: number }): Promise<string>
+    close(): Promise<void>
+  }
+  origin: string
+  port: number
+}
+
+export interface TestServerDependencies {
+  startMock(): Promise<MockSub2Api>
+  createCandidate(mock: MockSub2Api): Promise<TestAppCandidate>
+  maxListenAttempts: number
+}
+
 const SESSION_SECRET = 'e2e-session-secret-00000000000000000001'
 const OPERATION_SECRET = 'e2e-operation-secret-00000000000000002'
+const REPOSITORY_ROOT = fileURLToPath(new URL('../../../', import.meta.url))
 
 async function availablePort(): Promise<number> {
   const reservation = createServer()
@@ -41,8 +58,36 @@ function childUrl(origin: string, token: string, parameters: Record<string, stri
   return url.toString()
 }
 
-async function startTestEnvironment(): Promise<TestEnvironment & { close(): Promise<void> }> {
-  const mock = await startMockSub2Api()
+function isAddressInUse(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error
+    && error.code === 'EADDRINUSE'
+}
+
+async function cleanup(resources: Array<{ close(): Promise<void> }>): Promise<unknown[]> {
+  const settled = await Promise.allSettled(resources.map(async (resource) => resource.close()))
+  return settled.flatMap((result) => result.status === 'rejected' ? [result.reason] : [])
+}
+
+function throwFailure(primary: unknown, cleanupErrors: unknown[]): never {
+  if (cleanupErrors.length === 0) throw primary
+  throw new AggregateError([primary, ...cleanupErrors], 'E2E environment setup and cleanup failed', {
+    cause: primary,
+  })
+}
+
+function idempotentClose(resources: Array<{ close(): Promise<void> }>): () => Promise<void> {
+  let closing: Promise<void> | null = null
+  return () => {
+    closing ??= (async () => {
+      const errors = await cleanup(resources)
+      if (errors.length === 1) throw errors[0]
+      if (errors.length > 1) throw new AggregateError(errors, 'E2E environment cleanup failed')
+    })()
+    return closing
+  }
+}
+
+async function createDefaultCandidate(mock: MockSub2Api): Promise<TestAppCandidate> {
   const port = await availablePort()
   const origin = `http://127.0.0.1:${port}`
   const config: Readonly<AppConfig> = Object.freeze({
@@ -55,39 +100,73 @@ async function startTestEnvironment(): Promise<TestEnvironment & { close(): Prom
     sessionSecret: SESSION_SECRET,
     operationSigningSecret: OPERATION_SECRET,
     operationTtlMinutes: 60,
-    upstreamTimeoutMs: 250,
+    upstreamTimeoutMs: 1_000,
     trustProxy: false,
     logLevel: 'silent',
     cookieSecure: false,
   })
-  const app = buildApp(config, { webRoot: resolve('dist/web') })
-  const iframeChild = childUrl(origin, mock.userToken, {
-    user_id: '7',
-    theme: 'dark',
-    ui_mode: 'iframe',
-    lang: 'zh-CN',
-  })
-  app.get('/e2e-parent', async (_request, reply) => reply
-    .type('text/html; charset=utf-8')
-    .send(`<!doctype html><html><body style="margin:0"><iframe id="tool-frame" title="余额兑换工具" src="${iframeChild}" style="width:100%;height:780px;border:0"></iframe></body></html>`))
-
-  try {
-    await app.listen({ host: '127.0.0.1', port })
-  } catch (error) {
-    await mock.close()
-    throw error
-  }
-
   return {
+    app: buildApp(config, { webRoot: resolve(REPOSITORY_ROOT, 'dist/web') }),
     origin,
-    mock,
-    authenticatedUrl: (parameters = {}) => childUrl(origin, mock.userToken, parameters),
-    iframeParentUrl: () => `${origin}/e2e-parent`,
-    close: async () => {
-      await app.close()
-      await mock.close()
-    },
+    port,
   }
+}
+
+const defaultDependencies: TestServerDependencies = {
+  startMock: startMockSub2Api,
+  createCandidate: createDefaultCandidate,
+  maxListenAttempts: 3,
+}
+
+export async function startTestEnvironment(
+  dependencies: TestServerDependencies = defaultDependencies,
+): Promise<TestEnvironment & { close(): Promise<void> }> {
+  const mock = await dependencies.startMock()
+
+  for (let attempt = 1; attempt <= dependencies.maxListenAttempts; attempt += 1) {
+    let candidate: TestAppCandidate
+    try {
+      candidate = await dependencies.createCandidate(mock)
+    } catch (error) {
+      throwFailure(error, await cleanup([mock]))
+    }
+
+    try {
+      await candidate.app.listen({ host: '127.0.0.1', port: candidate.port })
+    } catch (error) {
+      const appCleanupErrors = await cleanup([candidate.app])
+      if (isAddressInUse(error)
+        && attempt < dependencies.maxListenAttempts
+        && appCleanupErrors.length === 0) continue
+      const mockCleanupErrors = await cleanup([mock])
+      throwFailure(error, [...appCleanupErrors, ...mockCleanupErrors])
+    }
+
+    try {
+      mock.setIframeChildUrl(childUrl(candidate.origin, mock.userToken, {
+        user_id: '7',
+        theme: 'dark',
+        ui_mode: 'iframe',
+        lang: 'zh-CN',
+      }))
+    } catch (error) {
+      throwFailure(error, await cleanup([candidate.app, mock]))
+    }
+
+    return {
+      origin: candidate.origin,
+      mock,
+      authenticatedUrl: (parameters = {}) => childUrl(
+        candidate.origin,
+        mock.userToken,
+        parameters,
+      ),
+      iframeParentUrl: () => `${mock.origin}/e2e-parent`,
+      close: idempotentClose([candidate.app, mock]),
+    }
+  }
+
+  throw new Error('unreachable E2E listen retry state')
 }
 
 export const test = base.extend<{ environment: TestEnvironment }>({
