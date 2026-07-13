@@ -871,10 +871,35 @@ describe('production web hosting', () => {
     expect(asset.headers['content-type']).toMatch(/^(?:application|text)\/javascript/)
     expect(asset.body).toBe('globalThis.fixtureLoaded=true')
 
-    const historyFallback = await app.inject({ method: 'GET', url: '/history' })
+    const historyFallback = await app.inject({
+      method: 'GET',
+      url: '/history',
+      headers: { accept: 'text/html' },
+    })
     expect(historyFallback.statusCode).toBe(200)
     expect(historyFallback.headers['content-type']).toMatch(/^text\/html/)
     expect(historyFallback.body).toContain('production fixture')
+
+    const headNavigation = await app.inject({
+      method: 'HEAD',
+      url: '/history',
+      headers: { accept: 'text/html' },
+    })
+    expect(headNavigation.statusCode).toBe(200)
+    expect(headNavigation.headers['content-type']).toMatch(/^text\/html/)
+    expect(headNavigation.body).toBe('')
+
+    for (const accept of ['application/json', '*/*', 'text/html;q=0', undefined]) {
+      const nonNavigation = await app.inject({
+        method: 'GET',
+        url: '/reports',
+        headers: accept === undefined ? {} : { accept },
+      })
+      expect(nonNavigation.statusCode).toBe(404)
+      stableError(nonNavigation, 'SESSION_INVALID')
+      expect(nonNavigation.headers['content-type']).toMatch(/^application\/json/)
+      expect(nonNavigation.body).not.toContain('production fixture')
+    }
 
     const unknownApi = await app.inject({ method: 'GET', url: '/api/unknown?token=API-SECRET' })
     expect(unknownApi.statusCode).toBe(404)

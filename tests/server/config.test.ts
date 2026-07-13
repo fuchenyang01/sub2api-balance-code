@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+
 import { describe, expect, it } from 'vitest'
 
 import { loadConfig } from '../../src/server/config.js'
@@ -15,7 +17,49 @@ function env(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   return { ...requiredEnv, ...overrides }
 }
 
+function parseEnvExample(): NodeJS.ProcessEnv {
+  const source = readFileSync(new URL('../../.env.example', import.meta.url), 'utf8')
+  return Object.fromEntries(
+    source
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line !== '' && !line.startsWith('#'))
+      .map((line) => {
+        const separator = line.indexOf('=')
+        if (separator < 1) throw new Error(`invalid env example line: ${line}`)
+        return [line.slice(0, separator), line.slice(separator + 1)]
+      }),
+  )
+}
+
 describe('loadConfig', () => {
+  it('keeps the complete env example unusable until every credential is replaced', () => {
+    const example = parseEnvExample()
+    expect(Object.keys(example).sort()).toEqual([
+      'APP_ORIGIN',
+      'COOKIE_SECURE',
+      'LOG_LEVEL',
+      'NODE_ENV',
+      'OPERATION_SIGNING_SECRET',
+      'OPERATION_TTL_MINUTES',
+      'PORT',
+      'SESSION_SECRET',
+      'SUB2API_ADMIN_API_KEY',
+      'SUB2API_BASE_URL',
+      'SUB2API_ORIGIN',
+      'TRUST_PROXY',
+      'UPSTREAM_TIMEOUT_MS',
+    ])
+    expect(() => loadConfig(example)).toThrow()
+
+    expect(() => loadConfig({
+      ...example,
+      SUB2API_ADMIN_API_KEY: 'admin-test-template-replacement',
+      SESSION_SECRET: 'test-template-session-secret-at-least-32-bytes',
+      OPERATION_SIGNING_SECRET: 'test-template-operation-secret-at-least-32-bytes',
+    })).not.toThrow()
+  })
+
   it.each(Object.keys(requiredEnv))('requires %s', (key) => {
     const input = env()
     delete input[key]

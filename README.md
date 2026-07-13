@@ -30,7 +30,7 @@
 | `LOG_LEVEL` | `info` | `fatal`、`error`、`warn`、`info`、`debug`、`trace` 或 `silent`。生产建议 `info`。 |
 | `COOKIE_SECURE` | `true` | 生产必须为 `true`；会话 Cookie 同时使用 HttpOnly、Secure、SameSite=Lax。 |
 
-从 `.env.example` 创建本地 `.env` 后，替换所有 `REPLACE` 占位值。模板中的值不是生产秘密。生成两条独立 32-byte 随机密钥时，分别执行两次以下命令，并把两次不同的输出分别配置给两个变量：
+从 `.env.example` 创建本地 `.env` 后，必须替换所有 `REPLACE_ME` 占位值。模板故意使用无法通过配置校验的 Admin Key 和短密钥，原样复制时服务一定拒绝启动；这些值不是生产秘密，也不能临时用于部署。生成两条独立 32-byte 随机密钥时，分别执行两次以下命令，并把两次不同的输出分别配置给两个变量：
 
 ```bash
 node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"

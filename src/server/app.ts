@@ -80,8 +80,25 @@ function requestPathname(request: FastifyRequest): string {
   }
 }
 
+function explicitlyAcceptsHtml(accept: string | undefined): boolean {
+  if (accept === undefined) return false
+  return accept.split(',').some((range) => {
+    const [mediaType, ...parameters] = range.split(';').map((part) => part.trim())
+    if (mediaType?.toLowerCase() !== 'text/html') return false
+    const qualityParameter = parameters.find((parameter) =>
+      parameter.slice(0, parameter.indexOf('=')).trim().toLowerCase() === 'q',
+    )
+    if (qualityParameter === undefined) return true
+    const separator = qualityParameter.indexOf('=')
+    const quality = qualityParameter.slice(separator + 1).trim()
+    if (!/^(?:0(?:\.\d{0,3})?|1(?:\.0{0,3})?)$/.test(quality)) return false
+    return Number(quality) > 0
+  })
+}
+
 function isSpaNavigation(request: FastifyRequest): boolean {
   if (request.method !== 'GET' && request.method !== 'HEAD') return false
+  if (!explicitlyAcceptsHtml(request.headers.accept)) return false
   const path = requestPathname(request)
   if (path === '/api' || path.startsWith('/api/')) return false
   if (path === '/healthz' || path.startsWith('/healthz/')) return false
