@@ -7,7 +7,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "dev": "tsx watch src/server/main.ts",
+    "dev": "tsx --env-file=.env watch src/server/main.ts",
     "dev:web": "vite --config vite.config.ts",
     "build": "npm run typecheck && npm run build:web && npm run build:server",
     "build:web": "vite build --config vite.config.ts",

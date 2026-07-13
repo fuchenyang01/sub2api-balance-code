@@ -1,3 +1,5 @@
+import { constants } from 'node:fs'
+import { access, stat } from 'node:fs/promises'
 import { extname, resolve } from 'node:path'
 import type { Writable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
@@ -105,6 +107,15 @@ function isSpaNavigation(request: FastifyRequest): boolean {
   return extname(path) === ''
 }
 
+async function verifyWebRoot(webRoot: string): Promise<void> {
+  const indexPath = resolve(webRoot, 'index.html')
+  const indexStats = await stat(indexPath)
+  if (!indexStats.isFile()) {
+    throw new Error('production web root index.html must be a readable file')
+  }
+  await access(indexPath, constants.R_OK)
+}
+
 function installErrorHandler(
   app: FastifyInstance,
   config: Readonly<AppConfig>,
@@ -209,6 +220,7 @@ export function buildApp(
     })
     await routes.register(rateLimit, { global: false })
     if (serveWeb) {
+      await verifyWebRoot(webRoot)
       await routes.register(fastifyStatic, {
         root: webRoot,
         wildcard: false,

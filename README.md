@@ -53,6 +53,8 @@ curl -fsS http://127.0.0.1:3100/healthz
 
 健康检查只返回 `{"status":"ok"}`，不包含版本、配置、上游响应或秘密。缺少必需配置、两个密钥相同/不足 32 字节、Admin Key 不以 `admin-` 开头，或生产 URL/Cookie 不安全时，容器会拒绝启动。
 
+`PORT` 同时决定应用监听端口和容器内 HEALTHCHECK 端口。若 `.env` 使用 `PORT=4000`，宿主机 3100 端口必须映射到容器 4000 端口：`-p 127.0.0.1:3100:4000`，不能继续映射到 3000。
+
 反向代理必须终止 TLS、限制请求体大小、设置合理的读写超时，并把 `Host`、`X-Forwarded-For`、`X-Forwarded-Proto` 传给应用。只有在容器端口不对外暴露且代理可信时才设置 `TRUST_PROXY=true`。边缘、WAF、CDN 和反向代理的访问日志不得记录 query string；尤其不能记录入口 URL 中的 `token` 或 `user_id`。Nginx 日志应使用 `$uri`，不要使用 `$request` 或 `$request_uri`。
 
 ## iframe 部署
@@ -95,6 +97,8 @@ SameSite=Lax 会话只支持以下两类 iframe 部署：
 服务端没有数据库或事务日志。待处理记录、最近历史和兑换码只保存在当前浏览器的 `localStorage`：清理浏览器数据会永久丢失；不会跨设备或跨浏览器同步；共享设备、浏览器扩展或本机账户被入侵时可能泄露兑换码。完成后应及时复制到受控系统，并在共享设备上清除历史。
 
 ## 开发与验证
+
+`npm run dev` 使用 Node.js 22 的 `--env-file=.env` 显式加载服务端配置；先按上文创建并完整填写 `.env`。Docker 部署仍由 `docker run --env-file .env` 注入配置。
 
 ```bash
 npm ci

@@ -841,6 +841,33 @@ describe('security headers, rate limits, and logging', () => {
 })
 
 describe('production web hosting', () => {
+  it.each(['missing directory', 'missing index'] as const)(
+    'refuses production startup when the web root has a %s',
+    async (scenario) => {
+      const temporaryRoot = await mkdtemp(join(tmpdir(), 'balance-code-invalid-web-'))
+      temporaryRoots.push(temporaryRoot)
+      const webRoot = join(temporaryRoot, 'web')
+      if (scenario === 'missing index') await mkdir(webRoot)
+
+      const app = buildApp(
+        { ...config, nodeEnv: 'production' },
+        {
+          users: new FakeUsers(),
+          conversions: new FakeConversions(),
+          secrets: secrets(),
+          webRoot,
+        },
+      )
+      apps.push(app)
+
+      const startupRejected = await app.ready().then(
+        () => false,
+        () => true,
+      )
+      expect(startupRejected).toBe(true)
+    },
+  )
+
   it('serves the built SPA and assets without swallowing API or health routes', async () => {
     const webRoot = await mkdtemp(join(tmpdir(), 'balance-code-web-'))
     temporaryRoots.push(webRoot)
