@@ -68,6 +68,17 @@ function isValidationError(error: FastifyError): boolean {
 }
 
 function installErrorHandler(app: FastifyInstance, config: Readonly<AppConfig>): void {
+  app.setNotFoundHandler((request, reply) => {
+    const body: ApiErrorBody = {
+      error: {
+        code: 'SESSION_INVALID',
+        message: safeMessages.SESSION_INVALID,
+        request_id: request.id,
+      },
+    }
+    return reply.code(404).send(body)
+  })
+
   app.setErrorHandler((error: FastifyError | AppError, request, reply) => {
     let code: ErrorCode
     let status: number

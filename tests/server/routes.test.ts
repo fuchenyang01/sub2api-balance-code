@@ -7,7 +7,6 @@ import { buildApp, type AppDependencies } from '../../src/server/app.js'
 import type { AppConfig } from '../../src/server/config.js'
 import type { ExecuteResponse, PrepareResponse } from '../../src/shared/contracts.js'
 import { AppError } from '../../src/server/errors.js'
-import { createLoggerOptions } from '../../src/server/security/redaction.js'
 import { SecretsService } from '../../src/server/security/secrets.js'
 import { UpstreamError } from '../../src/server/sub2api/http.js'
 import type { Profile } from '../../src/server/sub2api/types.js'
@@ -153,6 +152,17 @@ function stableError(response: { json(): unknown }, code: string): void {
   expect(JSON.stringify(body)).not.toMatch(/"(?:stack|cause|validation)"/i)
 }
 
+function expectClearedSessionCookie(value: string | string[] | undefined): void {
+  expect(value).toBeTypeOf('string')
+  const cookie = value as string
+  expect(cookie).toMatch(/redeem_session=;/)
+  expect(cookie).toMatch(/HttpOnly/i)
+  expect(cookie).toMatch(/Secure/i)
+  expect(cookie).toMatch(/SameSite=Lax/i)
+  expect(cookie).toMatch(/Path=\//i)
+  expect(cookie).toMatch(/Expires=Thu, 01 Jan 1970 00:00:00 GMT/i)
+}
+
 afterEach(async () => {
   await Promise.all(apps.splice(0).map((app) => app.close()))
 })
@@ -160,7 +170,8 @@ afterEach(async () => {
 describe('session routes', () => {
   it('exchanges an upstream-verified JWT for a secure cookie and minimal zero-balance profile', async () => {
     const { app, users } = await setup()
-    const userJwt = jwt()
+    const exp = Math.floor(Date.now() / 1_000) + 3_600
+    const userJwt = jwt(exp)
 
     const response = await exchange(app, userJwt, '/api/session/exchange?user_id=999&id=999')
 
@@ -176,6 +187,14 @@ describe('session routes', () => {
     expect(setCookie).toMatch(/SameSite=Lax/i)
     expect(setCookie).toMatch(/Path=\//i)
     expect(setCookie).toMatch(/Expires=/i)
+    const cookieExpires = /Expires=([^;]+)/i.exec(setCookie)?.[1]
+    expect(cookieExpires).toBeDefined()
+    expect(Date.parse(cookieExpires!)).toBeLessThanOrEqual(exp * 1_000)
+
+    const sealedSession = setCookie.split(';', 1)[0]!.slice('redeem_session='.length)
+    const session = await secrets().unsealSession(sealedSession)
+    expect(Date.parse(session.expiresAt)).toBeLessThanOrEqual(exp * 1_000)
+    expect(session.expiresAt).toBe(new Date(exp * 1_000).toISOString())
   })
 
   it('rejects malformed, missing-exp, unsafe-exp, and expired JWTs without leaking them', async () => {
@@ -252,7 +271,7 @@ describe('session routes', () => {
 
     expect(response.statusCode).toBe(401)
     stableError(response, code)
-    expect(response.headers['set-cookie']).toMatch(/redeem_session=;/)
+    expectClearedSessionCookie(response.headers['set-cookie'])
   })
 
   it('rejects a profile ID mismatch and clears the cookie', async () => {
@@ -264,7 +283,7 @@ describe('session routes', () => {
 
     expect(response.statusCode).toBe(401)
     stableError(response, 'SESSION_INVALID')
-    expect(response.headers['set-cookie']).toMatch(/redeem_session=;/)
+    expectClearedSessionCookie(response.headers['set-cookie'])
   })
 
   it.each([
@@ -281,7 +300,7 @@ describe('session routes', () => {
     stableError(response, code)
     expect(response.body).not.toContain('SECRET-JWT')
     if (code === 'SESSION_EXPIRED') {
-      expect(response.headers['set-cookie']).toMatch(/redeem_session=;/)
+      expectClearedSessionCookie(response.headers['set-cookie'])
     } else {
       expect(response.headers['set-cookie']).toBeUndefined()
     }
@@ -296,8 +315,7 @@ describe('session routes', () => {
     })
 
     expect(response.statusCode).toBe(204)
-    expect(response.headers['set-cookie']).toMatch(/redeem_session=;/)
-    expect(response.headers['set-cookie']).toMatch(/Path=\//)
+    expectClearedSessionCookie(response.headers['set-cookie'])
   })
 })
 
@@ -328,12 +346,40 @@ describe('origin and schemas', () => {
     },
   )
 
+  it.each([`${appOrigin}/`, 'https://app.example.test:443', 'https://APP.example.test']) (
+    'rejects a non-exact spelling of an allowed origin: %s',
+    async (origin) => {
+      const { app } = await setup()
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/session/exchange',
+        headers: { origin },
+        payload: { token: jwt() },
+      })
+
+      expect(response.statusCode).toBe(403)
+      stableError(response, 'SESSION_INVALID')
+    },
+  )
+
   it('enforces Origin before resolving an unknown write route', async () => {
     const { app } = await setup()
     const response = await app.inject({ method: 'POST', url: '/unknown-write' })
 
     expect(response.statusCode).toBe(403)
     stableError(response, 'SESSION_INVALID')
+  })
+
+  it.each([
+    ['GET', '/unknown?token=SECRET-JWT', {}],
+    ['POST', '/unknown?operation_token=SECRET-OP', { origin: appOrigin }],
+  ] as const)('returns a stable non-reflective 404 for %s unknown routes', async (method, url, headers) => {
+    const { app } = await setup()
+    const response = await app.inject({ method, url, headers })
+
+    expect(response.statusCode).toBe(404)
+    stableError(response, 'SESSION_INVALID')
+    expect(response.body).not.toMatch(/SECRET-JWT|SECRET-OP|operation_token|Fastify|Not Found/i)
   })
 
   it('allows GET health without Origin and exposes no configuration', async () => {
@@ -388,6 +434,20 @@ describe('origin and schemas', () => {
     expect(response.statusCode).toBe(413)
     stableError(response, 'SESSION_INVALID')
     expect(response.body).not.toContain('xxxx')
+  })
+
+  it('rejects malformed JSON without exposing parser detail or the request body', async () => {
+    const { app } = await setup()
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/session/exchange',
+      headers: { origin: appOrigin, 'content-type': 'application/json' },
+      payload: '{"token":"JSON-SECRET-JWT"',
+    })
+
+    expect(response.statusCode).toBe(400)
+    stableError(response, 'SESSION_INVALID')
+    expect(response.body).not.toMatch(/JSON-SECRET-JWT|Unexpected|JSON|position|body/i)
   })
 })
 
@@ -497,35 +557,69 @@ describe('security headers, rate limits, and logging', () => {
     expect(execute.statusCode).toBe(200)
   })
 
-  it.each([
-    ['/api/conversions/prepare', { operation_id: operationId, amount: '1' }, 'AMOUNT_INVALID'],
-    ['/api/conversions/execute', { operation_token: 'operation-token' }, 'OPERATION_TOKEN_INVALID'],
-  ])('rate limits authenticated users independently on %s', async (url, payload, code) => {
-    const { app } = await setup()
-    const cookie = await cookieFor(app)
-    for (let count = 0; count < 10; count += 1) {
-      expect(
-        (
-          await app.inject({
-            method: 'POST',
-            url,
-            headers: { origin: appOrigin, cookie },
-            payload,
-          })
-        ).statusCode,
-      ).toBeLessThan(300)
-    }
-    const limited = await app.inject({
+  it('keeps prepare and execute rate-limit budgets independent in both directions', async () => {
+    const prepareRequest = { operation_id: operationId, amount: '1' }
+    const executeRequest = { operation_token: 'operation-token' }
+    const send = (
+      app: FastifyInstance,
+      cookie: string,
+      route: 'prepare' | 'execute',
+    ) => app.inject({
       method: 'POST',
-      url,
+      url: `/api/conversions/${route}`,
       headers: { origin: appOrigin, cookie },
-      payload,
+      payload: route === 'prepare' ? prepareRequest : executeRequest,
     })
-    expect(limited.statusCode).toBe(429)
-    stableError(limited, code)
+
+    const first = await setup()
+    const firstCookie = await cookieFor(first.app)
+    for (let count = 0; count < 10; count += 1) {
+      expect((await send(first.app, firstCookie, 'prepare')).statusCode).toBe(200)
+    }
+    const prepareLimited = await send(first.app, firstCookie, 'prepare')
+    expect(prepareLimited.statusCode).toBe(429)
+    stableError(prepareLimited, 'AMOUNT_INVALID')
+    expect((await send(first.app, firstCookie, 'execute')).statusCode).toBe(200)
+
+    const second = await setup()
+    const secondCookie = await cookieFor(second.app)
+    for (let count = 0; count < 10; count += 1) {
+      expect((await send(second.app, secondCookie, 'execute')).statusCode).toBe(200)
+    }
+    const executeLimited = await send(second.app, secondCookie, 'execute')
+    expect(executeLimited.statusCode).toBe(429)
+    stableError(executeLimited, 'OPERATION_TOKEN_INVALID')
+    expect((await send(second.app, secondCookie, 'prepare')).statusCode).toBe(200)
   })
 
-  it('redacts credentials and serializes request URLs without query strings', () => {
+  it('keys protected rate limits by authenticated user ID', async () => {
+    const user7Jwt = rawJwt({ exp: Math.floor(Date.now() / 1_000) + 3_600, marker: 7 })
+    const user8Jwt = rawJwt({ exp: Math.floor(Date.now() / 1_000) + 3_600, marker: 8 })
+    const users: UserClient = {
+      async getProfile(userJwt) {
+        if (userJwt === user7Jwt) return profile
+        if (userJwt === user8Jwt) return { ...profile, id: 8, username: 'bob' }
+        throw new UpstreamError('auth', 'unknown test token')
+      },
+    }
+    const { app } = await setup({ users })
+    const user7Cookie = await cookieFor(app, user7Jwt)
+    const user8Cookie = await cookieFor(app, user8Jwt)
+    const prepare = (cookie: string) => app.inject({
+      method: 'POST',
+      url: '/api/conversions/prepare',
+      headers: { origin: appOrigin, cookie },
+      payload: { operation_id: operationId, amount: '1' },
+    })
+
+    for (let count = 0; count < 10; count += 1) {
+      expect((await prepare(user7Cookie)).statusCode).toBe(200)
+    }
+    expect((await prepare(user7Cookie)).statusCode).toBe(429)
+    expect((await prepare(user8Cookie)).statusCode).toBe(200)
+  })
+
+  it('redacts credentials and query strings from real Pino output', async () => {
     let output = ''
     const stream = new Writable({
       write(chunk, _encoding, callback) {
@@ -533,15 +627,45 @@ describe('security headers, rate limits, and logging', () => {
         callback()
       },
     })
-    const options = createLoggerOptions('info', stream)
-    const req = options.serializers!.req!({
+    const users = new FakeUsers()
+    const conversions = new FakeConversions()
+    const app = buildApp({ ...config, logLevel: 'info' }, {
+      users,
+      conversions,
+      secrets: secrets(),
+      loggerStream: stream,
+    })
+    apps.push(app)
+    await app.ready()
+
+    await app.inject({
       method: 'GET',
-      url: '/api/me?token=QUERY-SECRET',
+      url: '/healthz?token=QUERY-SECRET',
       headers: { authorization: 'Bearer SECRET-JWT', cookie: 'redeem_session=SECRET-COOKIE' },
-    }) as Record<string, unknown>
-    expect(req).toEqual({ method: 'GET', url: '/api/me' })
-    expect(JSON.stringify(options.redact)).toMatch(/authorization|cookie|operation_token|x-api-key|code/i)
-    expect(JSON.stringify(req)).not.toMatch(/QUERY-SECRET|SECRET-JWT|SECRET-COOKIE/)
-    expect(output).not.toMatch(/QUERY-SECRET|SECRET-JWT|SECRET-COOKIE/)
+    })
+    app.log.info({
+      body: {
+        token: 'BODY-SECRET-JWT',
+        operation_token: 'BODY-SECRET-OP',
+        code: 'OBJECT-SECRET-CODE',
+      },
+      headers: { 'x-api-key': 'X-API-SECRET' },
+      sub2apiAdminApiKey: 'ADMIN-SECRET',
+    }, 'redaction probe')
+
+    const sessionCookie = await cookieFor(app)
+    await app.inject({
+      method: 'POST',
+      url: '/api/conversions/execute',
+      headers: { origin: appOrigin, cookie: sessionCookie },
+      payload: { operation_token: 'EXECUTE-SECRET-OP' },
+    })
+    await new Promise<void>((resolve) => setImmediate(resolve))
+
+    expect(output.length).toBeGreaterThan(0)
+    expect(output).toContain('[REDACTED]')
+    expect(output).not.toMatch(
+      /QUERY-SECRET|SECRET-JWT|SECRET-COOKIE|BODY-SECRET-OP|OBJECT-SECRET-CODE|X-API-SECRET|ADMIN-SECRET|EXECUTE-SECRET-OP|REDEEM-SECRET-CODE/,
+    )
   })
 })
