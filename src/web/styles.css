@@ -147,13 +147,20 @@ input:focus-visible {
 }
 
 .account-balance {
-  flex: 0 0 auto;
+  flex: 1 1 auto;
+  min-width: 0;
   gap: 7px;
   color: var(--muted);
 }
 
 .account-balance strong {
+  min-width: 0;
   color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.account-balance svg {
+  flex: 0 0 auto;
 }
 
 .icon-button {

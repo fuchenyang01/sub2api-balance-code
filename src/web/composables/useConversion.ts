@@ -115,6 +115,7 @@ export function createUseConversion(api: ConversionApi): ConversionController {
   const loading = ref(false)
   const busy = ref(false)
   let initialization: Promise<void> | null = null
+  let pendingExchangeToken: string | null = null
 
   async function loadProfile(): Promise<void> {
     profile.value = await api.me()
@@ -125,6 +126,7 @@ export function createUseConversion(api: ConversionApi): ConversionController {
     const safeError = toConversionError(caught)
     error.value = safeError
     if (sessionCodes.has(safeError.code)) {
+      pendingExchangeToken = null
       session.value = 'expired'
       profile.value = null
     } else if (session.value === 'loading') {
@@ -139,11 +141,15 @@ export function createUseConversion(api: ConversionApi): ConversionController {
       error.value = null
       const url = new URL(window.location.href)
       applyUrlPreferences(url)
+      const token = url.searchParams.get('token')
+      if (url.searchParams.has('token') || url.searchParams.has('user_id')) {
+        cleanSensitiveQuery(url)
+      }
+      if (token !== null && token.length > 0) pendingExchangeToken = token
       try {
-        const token = url.searchParams.get('token')
-        if (token !== null && token.length > 0) {
-          await api.exchange(token)
-          cleanSensitiveQuery(url)
+        if (pendingExchangeToken !== null) {
+          await api.exchange(pendingExchangeToken)
+          pendingExchangeToken = null
         }
         await loadProfile()
       } catch (caught) {
@@ -160,6 +166,10 @@ export function createUseConversion(api: ConversionApi): ConversionController {
     busy.value = true
     error.value = null
     try {
+      if (pendingExchangeToken !== null) {
+        await api.exchange(pendingExchangeToken)
+        pendingExchangeToken = null
+      }
       await loadProfile()
     } catch (caught) {
       handleError(caught)

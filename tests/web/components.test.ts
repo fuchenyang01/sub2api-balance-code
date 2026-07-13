@@ -53,6 +53,16 @@ describe('responsive stylesheet', () => {
   it('does not force body wider than a narrow iframe viewport', () => {
     expect(styles).not.toMatch(/body\s*\{[^}]*min-width\s*:/s)
   })
+
+  it('allows an extreme account balance to shrink and wrap inside the account bar', () => {
+    const balanceRule = styles.match(/\.account-balance\s*\{([^}]*)\}/s)?.[1] ?? ''
+    const valueRule = styles.match(/\.account-balance strong\s*\{([^}]*)\}/s)?.[1] ?? ''
+
+    expect(balanceRule).toMatch(/min-width\s*:\s*0/)
+    expect(balanceRule).toMatch(/flex\s*:\s*1\s+1/)
+    expect(valueRule).toMatch(/min-width\s*:\s*0/)
+    expect(valueRule).toMatch(/overflow-wrap\s*:\s*anywhere/)
+  })
 })
 
 describe('ConversionForm', () => {

@@ -1,3 +1,6 @@
+import { Decimal } from 'decimal.js'
+import { z } from 'zod'
+
 import {
   errorCodes,
   type ErrorCode,
@@ -19,6 +22,47 @@ export interface ConversionApi {
 }
 
 const knownErrorCodes = new Set<string>(errorCodes)
+
+const plainDecimalSchema = z.string()
+  .regex(/^\d+(?:\.\d+)?$/)
+  .refine((value) => {
+    try {
+      return new Decimal(value).isFinite()
+    } catch {
+      return false
+    }
+  })
+
+const amountSchema = plainDecimalSchema.refine((value) => new Decimal(value).greaterThan(0))
+const isoDateSchema = z.string().refine((value) => (
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)
+  && !Number.isNaN(Date.parse(value))
+))
+const errorCodeSchema = z.enum(errorCodes)
+const meResponseSchema = z.object({
+  id: z.number().int().positive(),
+  username: z.string(),
+  balance: plainDecimalSchema,
+}).strict()
+const prepareResponseSchema = z.object({
+  operation_token: z.string().min(1),
+  expires_at: isoDateSchema,
+  amount: amountSchema,
+}).strict()
+const executeResponseSchema = z.discriminatedUnion('status', [
+  z.object({
+    status: z.literal('completed'),
+    operation_id: z.string().min(1),
+    amount: amountSchema,
+    code: z.string().min(1),
+    created_at: isoDateSchema,
+  }).strict(),
+  z.object({
+    status: z.literal('pending'),
+    operation_id: z.string().min(1),
+    error: errorCodeSchema,
+  }).strict(),
+])
 
 const safeMessages: Record<ErrorCode, string> = {
   SESSION_REQUIRED: '会话已失效',
@@ -81,7 +125,12 @@ async function parseJson(response: Response): Promise<unknown> {
 }
 
 export function createApiClient(fetcher: Fetcher = globalThis.fetch.bind(globalThis)): ConversionApi {
-  async function request<T>(path: string, method: 'GET' | 'POST', body?: unknown): Promise<T> {
+  async function request<T>(
+    path: string,
+    method: 'GET' | 'POST',
+    schema: z.ZodType<T> | null,
+    body?: unknown,
+  ): Promise<T> {
     const init: RequestInit = { method, credentials: 'same-origin' }
     if (body !== undefined) {
       init.headers = { 'Content-Type': 'application/json' }
@@ -89,23 +138,31 @@ export function createApiClient(fetcher: Fetcher = globalThis.fetch.bind(globalT
     }
 
     const response = await fetcher(path, init)
-    if (response.status === 204) return undefined as T
-    const parsed = await parseJson(response)
-    if (response.ok) return parsed as T
-
-    const stable = parseStableError(parsed)
-    if (stable !== null) {
-      throw new ApiClientError(stable.code, response.status, stable.requestId)
+    if (response.status === 204) {
+      if (schema === null) return undefined as T
+      throw new ApiClientError('UPSTREAM_UNAVAILABLE', response.status, '')
     }
-    throw new ApiClientError('UPSTREAM_UNAVAILABLE', response.status, '')
+    const parsed = await parseJson(response)
+    if (!response.ok) {
+      const stable = parseStableError(parsed)
+      if (stable !== null) {
+        throw new ApiClientError(stable.code, response.status, stable.requestId)
+      }
+      throw new ApiClientError('UPSTREAM_UNAVAILABLE', response.status, '')
+    }
+    if (schema === null) throw new ApiClientError('UPSTREAM_UNAVAILABLE', response.status, '')
+
+    const validated = schema.safeParse(parsed)
+    if (!validated.success) throw new ApiClientError('UPSTREAM_UNAVAILABLE', response.status, '')
+    return validated.data
   }
 
   return {
-    exchange: (token) => request('/api/session/exchange', 'POST', { token }),
-    me: () => request('/api/me', 'GET'),
-    logout: () => request('/api/session/logout', 'POST'),
-    prepare: (body) => request('/api/conversions/prepare', 'POST', body),
-    execute: (body) => request('/api/conversions/execute', 'POST', body),
+    exchange: (token) => request('/api/session/exchange', 'POST', meResponseSchema, { token }),
+    me: () => request('/api/me', 'GET', meResponseSchema),
+    logout: () => request<void>('/api/session/logout', 'POST', null),
+    prepare: (body) => request('/api/conversions/prepare', 'POST', prepareResponseSchema, body),
+    execute: (body) => request('/api/conversions/execute', 'POST', executeResponseSchema, body),
   }
 }
 

@@ -78,6 +78,51 @@ describe('useConversion initialization', () => {
     expect(document.documentElement.lang).toBe('en-US')
   })
 
+  it('cleans a transiently failing URL token and retries the same in-memory token on refresh', async () => {
+    history.replaceState(
+      null,
+      '',
+      '/?token=jwt-retry-secret&user_id=99&theme=dark&source=portal',
+    )
+    const exchange = vi.fn()
+      .mockRejectedValueOnce(
+        new ApiClientError('UPSTREAM_UNAVAILABLE', 503, 'request-503', '服务暂时不可用'),
+      )
+      .mockResolvedValueOnce(profile)
+    const me = vi.fn().mockResolvedValue(profile)
+    const conversion = createUseConversion(api({ exchange, me }))
+
+    await conversion.initialize()
+
+    expect(location.search).toBe('?theme=dark&source=portal')
+    expect(exchange).toHaveBeenCalledTimes(1)
+    expect(me).not.toHaveBeenCalled()
+    expect(conversion.session.value).toBe('error')
+
+    await conversion.refresh()
+
+    expect(exchange).toHaveBeenCalledTimes(2)
+    expect(exchange).toHaveBeenLastCalledWith('jwt-retry-secret')
+    expect(me).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(exchange).mock.invocationCallOrder[1]).toBeLessThan(
+      vi.mocked(me).mock.invocationCallOrder[0] ?? 0,
+    )
+    expect(conversion.session.value).toBe('authenticated')
+    expect(conversion.profile.value).toEqual(profile)
+  })
+
+  it('removes empty token and user_id parameters before using the cookie session', async () => {
+    history.replaceState(null, '', '/?token=&user_id=&theme=light&source=portal')
+    const client = api()
+    const conversion = createUseConversion(client)
+
+    await conversion.initialize()
+
+    expect(location.search).toBe('?theme=light&source=portal')
+    expect(client.exchange).not.toHaveBeenCalled()
+    expect(client.me).toHaveBeenCalledTimes(1)
+  })
+
   it.each(['SESSION_REQUIRED', 'SESSION_INVALID', 'SESSION_EXPIRED'] as const)(
     'surfaces %s as an expired session without exposing unsafe detail',
     async (code) => {
@@ -266,5 +311,49 @@ describe('API client', () => {
     })
     expect((error as Error).message).not.toContain('Too many requests from upstream')
     expect(error).not.toHaveProperty('leaked')
+  })
+
+  it.each([
+    [
+      'malformed me',
+      new Response(JSON.stringify({ id: 0, username: 'alice', balance: '1' }), { status: 200 }),
+      (client: ConversionApi) => client.me(),
+    ],
+    [
+      'prepare 204',
+      new Response(null, { status: 204 }),
+      (client: ConversionApi) => client.prepare({ operation_id: operationId, amount: '1' }),
+    ],
+    [
+      'completed execution without code',
+      new Response(JSON.stringify({
+        status: 'completed', operation_id: operationId, amount: '1',
+        created_at: '2026-07-13T00:00:00.000Z',
+      }), { status: 200 }),
+      (client: ConversionApi) => client.execute({ operation_token: 'operation-secret' }),
+    ],
+    [
+      'pending execution carrying a code',
+      new Response(JSON.stringify({
+        status: 'pending', operation_id: operationId, error: 'CONVERSION_PENDING',
+        code: 'MUST-NOT-BE-RETAINED',
+      }), { status: 202 }),
+      (client: ConversionApi) => client.execute({ operation_token: 'operation-secret' }),
+    ],
+    [
+      'logout 200 response',
+      new Response(JSON.stringify({ unexpected: 'RAW-RESPONSE' }), { status: 200 }),
+      (client: ConversionApi) => client.logout(),
+    ],
+  ] as const)('rejects a successful %s response with a safe typed error', async (_name, response, invoke) => {
+    const client = createApiClient(vi.fn().mockResolvedValue(response))
+
+    const error = await invoke(client).catch((caught: unknown) => caught)
+
+    expect(error).toBeInstanceOf(ApiClientError)
+    expect(error).toMatchObject({
+      code: 'UPSTREAM_UNAVAILABLE', status: response.status, requestId: '', message: '服务暂时不可用',
+    })
+    expect((error as Error).message).not.toMatch(/MUST-NOT-BE-RETAINED|RAW-RESPONSE/)
   })
 })
