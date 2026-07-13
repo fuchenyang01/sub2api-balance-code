@@ -30,6 +30,25 @@ function derivedKey(secret: string): Uint8Array {
   return createHash('sha256').update(secret, 'utf8').digest()
 }
 
+function tamperCompactToken(
+  token: string,
+  segmentIndex: number,
+): { token: string; originalSegment: string; tamperedSegment: string } {
+  const segments = token.split('.')
+  const originalSegment = segments[segmentIndex]
+  if (originalSegment === undefined || originalSegment.length < 3) {
+    throw new Error('Compact token segment is too short to tamper safely')
+  }
+
+  const position = Math.floor(originalSegment.length / 2)
+  const replacement = originalSegment[position] === 'A' ? 'B' : 'A'
+  const tamperedSegment =
+    originalSegment.slice(0, position) + replacement + originalSegment.slice(position + 1)
+  segments[segmentIndex] = tamperedSegment
+
+  return { token: segments.join('.'), originalSegment, tamperedSegment }
+}
+
 async function expectAppError(
   action: () => Promise<unknown>,
   code: 'SESSION_INVALID' | 'SESSION_EXPIRED' | 'OPERATION_TOKEN_INVALID' | 'OPERATION_TOKEN_EXPIRED',
@@ -84,24 +103,36 @@ describe('SecretsService sessions', () => {
     })
   })
 
-  it.each(['wrong secret', 'tampered token', 'malformed token'])('rejects a %s', async (kind) => {
+  it('rejects a token encrypted with a different session secret', async () => {
     const token = await service().sealSession({
       userJwt,
       userId: 42,
       expiresAt: new Date('2026-07-13T09:00:00.000Z'),
     })
-    const subject =
-      kind === 'wrong secret'
-        ? service({ sessionSecret: otherSessionSecret })
-        : service()
-    const input =
-      kind === 'tampered token'
-        ? `${token.slice(0, -1)}${token.endsWith('a') ? 'b' : 'a'}`
-        : kind === 'malformed token'
-          ? 'not-a-compact-jwe'
-          : token
 
-    await expectAppError(() => subject.unsealSession(input), 'SESSION_INVALID')
+    await expectAppError(
+      () => service({ sessionSecret: otherSessionSecret }).unsealSession(token),
+      'SESSION_INVALID',
+    )
+  })
+
+  it('rejects a token with deterministically tampered ciphertext bytes', async () => {
+    const token = await service().sealSession({
+      userJwt,
+      userId: 42,
+      expiresAt: new Date('2026-07-13T09:00:00.000Z'),
+    })
+    const tampered = tamperCompactToken(token, 3)
+
+    expect(tampered.token).not.toBe(token)
+    expect(Buffer.from(tampered.tamperedSegment, 'base64url')).not.toEqual(
+      Buffer.from(tampered.originalSegment, 'base64url'),
+    )
+    await expectAppError(() => service().unsealSession(tampered.token), 'SESSION_INVALID')
+  })
+
+  it('rejects a malformed compact JWE', async () => {
+    await expectAppError(() => service().unsealSession('not-a-compact-jwe'), 'SESSION_INVALID')
   })
 
   it('rejects an unsupported protected header', async () => {
@@ -177,18 +208,27 @@ describe('SecretsService operation tokens', () => {
     await expectAppError(() => service().verifyOperation(token, 42), 'OPERATION_TOKEN_EXPIRED')
   })
 
-  it.each(['wrong secret', 'tampered token'])('rejects a token with a %s', async (kind) => {
+  it('rejects a token signed with a different operation secret', async () => {
     const { token } = await service().signOperation({ operationId, userId: 42, amount: '1.23' })
-    const subject =
-      kind === 'wrong secret'
-        ? service({ operationSigningSecret: otherOperationSecret })
-        : service()
-    const input =
-      kind === 'tampered token'
-        ? `${token.slice(0, -1)}${token.endsWith('a') ? 'b' : 'a'}`
-        : token
 
-    await expectAppError(() => subject.verifyOperation(input, 42), 'OPERATION_TOKEN_INVALID')
+    await expectAppError(
+      () => service({ operationSigningSecret: otherOperationSecret }).verifyOperation(token, 42),
+      'OPERATION_TOKEN_INVALID',
+    )
+  })
+
+  it('rejects a token with deterministically tampered signature bytes', async () => {
+    const { token } = await service().signOperation({ operationId, userId: 42, amount: '1.23' })
+    const tampered = tamperCompactToken(token, 2)
+
+    expect(tampered.token).not.toBe(token)
+    expect(Buffer.from(tampered.tamperedSegment, 'base64url')).not.toEqual(
+      Buffer.from(tampered.originalSegment, 'base64url'),
+    )
+    await expectAppError(
+      () => service().verifyOperation(tampered.token, 42),
+      'OPERATION_TOKEN_INVALID',
+    )
   })
 
   it.each([
