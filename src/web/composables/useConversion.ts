@@ -403,6 +403,8 @@ export function createUseConversion(
         state: 'preparing',
       }
       if (!persistPending(operation)) return
+      result.value = null
+      pending.value = null
       await prepareAndExecute(operation)
     } catch (caught) {
       handleError(caught)
@@ -416,6 +418,8 @@ export function createUseConversion(
     if (busy.value || operation === null || operation.state === 'expired') return
     busy.value = true
     error.value = null
+    result.value = null
+    pending.value = null
     try {
       if (operation.state === 'preparing') {
         await prepareAndExecute(operation)

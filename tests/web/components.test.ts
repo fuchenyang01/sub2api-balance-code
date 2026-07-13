@@ -17,6 +17,7 @@ const appController = vi.hoisted((): {
   resumePending: ReturnType<typeof vi.fn>
   clearHistory: ReturnType<typeof vi.fn>
   pendingOperation: null | Record<string, unknown>
+  result: null | Record<string, unknown>
   history: Record<string, unknown>[]
 } => ({
   session: 'authenticated',
@@ -27,6 +28,7 @@ const appController = vi.hoisted((): {
   resumePending: vi.fn(),
   clearHistory: vi.fn(),
   pendingOperation: null,
+  result: null,
   history: [],
 }))
 
@@ -38,7 +40,7 @@ vi.mock('../../src/web/composables/useConversion.js', async (importOriginal) => 
     useConversion: () => ({
       session: ref(appController.session),
       profile: ref({ id: 7, username: 'alice', balance: '10' }),
-      result: ref(null),
+      result: ref(appController.result),
       pending: ref(null),
       pendingOperation: ref(appController.pendingOperation),
       history: ref(appController.history),
@@ -380,6 +382,32 @@ describe('App', () => {
     const remounted = mount(App)
     expect(remounted.text()).toContain('op-recovery')
     remounted.unmount()
+    appController.pendingOperation = null
+  })
+
+  it('does not render an old completed code while another operation needs recovery', () => {
+    appController.result = {
+      status: 'completed',
+      operation_id: 'op-first',
+      amount: '1',
+      code: 'CODE-FIRST',
+      created_at: '2026-07-13T00:00:00.000Z',
+    }
+    appController.pendingOperation = {
+      version: 1,
+      operation_id: 'op-second',
+      amount: '2',
+      state: 'pending',
+      operation_token: 'second-secret',
+      expires_at: '2099-07-13T01:00:00.000Z',
+    }
+
+    const wrapper = mount(App)
+
+    expect(wrapper.text()).toContain('op-second')
+    expect(wrapper.text()).not.toContain('CODE-FIRST')
+    wrapper.unmount()
+    appController.result = null
     appController.pendingOperation = null
   })
 })

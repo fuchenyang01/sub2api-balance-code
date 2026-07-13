@@ -117,7 +117,10 @@ onMounted(() => {
             :busy="conversion.busy.value || conversion.pendingOperation.value !== null"
             @submit="openConfirmation"
           />
-          <ConversionResult :result="conversion.result.value" :pending="conversion.pending.value" />
+          <ConversionResult
+            :result="conversion.pendingOperation.value === null ? conversion.result.value : null"
+            :pending="conversion.pending.value"
+          />
         </div>
 
         <HistoryList :items="conversion.history.value" @clear="conversion.clearHistory" />

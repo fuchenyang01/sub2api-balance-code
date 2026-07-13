@@ -387,6 +387,74 @@ describe('useConversion conversion', () => {
     expect(conversion.pendingOperation.value).toEqual(saved.at(-1))
   })
 
+  it('clears a previous code after the next persisted operation has an uncertain execute failure', async () => {
+    const secondOperationId = '223e4567-e89b-42d3-a456-426614174000'
+    vi.spyOn(globalThis.crypto, 'randomUUID')
+      .mockReturnValueOnce(operationId)
+      .mockReturnValueOnce(secondOperationId)
+    const saved: PendingOperation[] = []
+    const store = storage({
+      savePending: vi.fn().mockImplementation((value: PendingOperation) => {
+        saved.push(value)
+        return true
+      }),
+    })
+    const prepare = vi.fn()
+      .mockResolvedValueOnce({
+        operation_token: 'first-secret', expires_at: '2099-07-13T01:00:00.000Z', amount: '1',
+      })
+      .mockResolvedValueOnce({
+        operation_token: 'second-secret', expires_at: '2099-07-13T01:00:00.000Z', amount: '2',
+      })
+    const execute = vi.fn()
+      .mockResolvedValueOnce({
+        status: 'completed', operation_id: operationId, amount: '1', code: 'CODE-FIRST',
+        created_at: '2026-07-13T00:00:00.000Z',
+      })
+      .mockRejectedValueOnce(new TypeError('network failed'))
+    const conversion = createUseConversion(api({ prepare, execute }), store)
+
+    await conversion.convert('1')
+    expect(conversion.result.value?.code).toBe('CODE-FIRST')
+
+    await conversion.convert('2')
+
+    expect(conversion.result.value).toBeNull()
+    expect(conversion.pending.value).toBeNull()
+    expect(conversion.pendingOperation.value).toEqual({
+      version: 1,
+      operation_id: secondOperationId,
+      amount: '2',
+      state: 'pending',
+      operation_token: 'second-secret',
+      expires_at: '2099-07-13T01:00:00.000Z',
+    })
+    expect(saved.at(-1)).toEqual(conversion.pendingOperation.value)
+    expect(conversion.error.value).toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' })
+    expect(JSON.stringify({ result: conversion.result.value, pending: conversion.pending.value }))
+      .not.toContain('CODE-FIRST')
+  })
+
+  it('keeps a previous code when the next preparing operation cannot be persisted', async () => {
+    vi.spyOn(globalThis.crypto, 'randomUUID')
+      .mockReturnValueOnce(operationId)
+      .mockReturnValueOnce('223e4567-e89b-42d3-a456-426614174000')
+    const savePending = vi.fn()
+      .mockReturnValueOnce(true)
+      .mockReturnValueOnce(true)
+      .mockReturnValueOnce(false)
+    const conversion = createUseConversion(api(), storage({ savePending }))
+
+    await conversion.convert('1.25')
+    expect(conversion.result.value?.code).toBe('CODE-123')
+
+    await conversion.convert('2')
+
+    expect(conversion.result.value?.code).toBe('CODE-123')
+    expect(conversion.pendingOperation.value).toBeNull()
+    expect(conversion.error.value).toMatchObject({ code: 'MANUAL_REVIEW_REQUIRED' })
+  })
+
   it('loads pending recovery metadata without automatically calling prepare or execute', async () => {
     const pending: PendingOperation = {
       version: 1,
@@ -748,7 +816,7 @@ describe('useConversion conversion', () => {
     expect(conversion.result.value).toBeNull()
   })
 
-  it('keeps existing state and marks rate limiting as retryable', async () => {
+  it('clears stale pending display and keeps preparing recovery on rate limiting', async () => {
     vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(operationId)
     const client = api({
       prepare: vi.fn().mockRejectedValue(
@@ -764,7 +832,13 @@ describe('useConversion conversion', () => {
 
     await conversion.convert('1')
 
-    expect(conversion.pending.value?.operation_id).toBe('existing-operation')
+    expect(conversion.pending.value).toBeNull()
+    expect(conversion.pendingOperation.value).toEqual({
+      version: 1,
+      operation_id: operationId,
+      amount: '1',
+      state: 'preparing',
+    })
     expect(conversion.error.value).toMatchObject({
       code: 'RATE_LIMITED',
       message: '请求过于频繁',
