@@ -53,6 +53,13 @@ describe('loadConfig', () => {
     })
   })
 
+  it.each([
+    ['https://example.com/sub2api/', 'https://example.com/sub2api'],
+    ['https://example.com/', 'https://example.com'],
+  ])('normalizes base URL %s as %s', (input, expected) => {
+    expect(loadConfig(env({ SUB2API_BASE_URL: input })).sub2apiBaseUrl).toBe(expected)
+  })
+
   it('applies optional defaults', () => {
     expect(loadConfig(env())).toMatchObject({
       nodeEnv: 'development',
@@ -90,9 +97,26 @@ describe('loadConfig', () => {
     expect(() => loadConfig(env({ SUB2API_ADMIN_API_KEY: 'test-key' }))).toThrow()
   })
 
-  it.each(['SESSION_SECRET', 'OPERATION_SIGNING_SECRET'])('requires a 32-byte %s', (key) => {
-    expect(() => loadConfig(env({ [key]: '密'.repeat(10) }))).toThrow()
-  })
+  it.each(['SESSION_SECRET', 'OPERATION_SIGNING_SECRET'])(
+    'rejects a 31-byte ASCII %s',
+    (key) => {
+      expect(() => loadConfig(env({ [key]: 'a'.repeat(31) }))).toThrow()
+    },
+  )
+
+  it.each(['SESSION_SECRET', 'OPERATION_SIGNING_SECRET'])(
+    'accepts a 32-byte ASCII %s',
+    (key) => {
+      expect(() => loadConfig(env({ [key]: 'a'.repeat(32) }))).not.toThrow()
+    },
+  )
+
+  it.each(['SESSION_SECRET', 'OPERATION_SIGNING_SECRET'])(
+    'accepts an 11-character, 33-byte UTF-8 %s',
+    (key) => {
+      expect(() => loadConfig(env({ [key]: '密'.repeat(11) }))).not.toThrow()
+    },
+  )
 
   it('requires distinct secrets', () => {
     expect(() =>
@@ -115,6 +139,21 @@ describe('loadConfig', () => {
     expect(() =>
       loadConfig(env({ NODE_ENV: 'production', [key]: 'http://example.com' })),
     ).toThrow()
+  })
+
+  it('requires an HTTPS base URL in production', () => {
+    expect(() =>
+      loadConfig(env({ NODE_ENV: 'production', SUB2API_BASE_URL: 'http://example.com' })),
+    ).toThrow()
+  })
+
+  it.each([
+    'ftp://example.com/sub2api',
+    'https://user:password@example.com/sub2api',
+    'https://example.com/sub2api?token=value',
+    'https://example.com/sub2api#fragment',
+  ])('rejects unsafe base URL %s', (value) => {
+    expect(() => loadConfig(env({ SUB2API_BASE_URL: value }))).toThrow()
   })
 
   it('requires secure cookies in production', () => {

@@ -23,6 +23,32 @@ const secretSchema = z
   .string()
   .refine((value) => Buffer.byteLength(value, 'utf8') >= 32, 'must be at least 32 UTF-8 bytes')
 
+const baseUrlSchema = z
+  .string()
+  .superRefine((value, context) => {
+    try {
+      const url = new URL(value)
+      if (
+        !['http:', 'https:'].includes(url.protocol) ||
+        url.username !== '' ||
+        url.password !== '' ||
+        url.search !== '' ||
+        url.hash !== '' ||
+        value.includes('?') ||
+        value.includes('#')
+      ) {
+        context.addIssue({ code: 'custom', message: 'must be a safe HTTP(S) URL' })
+      }
+    } catch {
+      context.addIssue({ code: 'custom', message: 'must be a valid URL' })
+    }
+  })
+  .transform((value) => {
+    const url = new URL(value)
+    url.pathname = url.pathname.replace(/\/+$/, '')
+    return url.pathname === '/' ? url.origin : url.toString()
+  })
+
 const originSchema = z
   .string()
   .superRefine((value, context) => {
@@ -48,7 +74,7 @@ const originSchema = z
 
 const envSchema = z.object({
   NODE_ENV: z.enum(nodeEnvironments).default('development'),
-  SUB2API_BASE_URL: z.url().transform((value) => new URL(value).toString().replace(/\/+$/, '')),
+  SUB2API_BASE_URL: baseUrlSchema,
   SUB2API_ADMIN_API_KEY: z.string().startsWith('admin-'),
   APP_ORIGIN: originSchema,
   SUB2API_ORIGIN: originSchema,
@@ -87,7 +113,8 @@ export function loadConfig(input: NodeJS.ProcessEnv): Readonly<AppConfig> {
 
   if (
     env.NODE_ENV === 'production' &&
-    (!env.APP_ORIGIN.startsWith('https://') ||
+    (new URL(env.SUB2API_BASE_URL).protocol !== 'https:' ||
+      !env.APP_ORIGIN.startsWith('https://') ||
       !env.SUB2API_ORIGIN.startsWith('https://') ||
       !env.COOKIE_SECURE)
   ) {
