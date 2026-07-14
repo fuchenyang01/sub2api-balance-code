@@ -1,4 +1,5 @@
 import type { HistoryItem, PendingOperation } from '../shared/storage-types.js'
+import { MAX_BATCH_COUNT, MIN_BATCH_COUNT } from '../shared/contracts.js'
 
 export const PENDING_KEY = 'sub2api-code:pending:v1'
 export const HISTORY_KEY = 'sub2api-code:history:v1'
@@ -48,31 +49,46 @@ function isDate(value: unknown): value is string {
   return isNonEmptyString(value) && !Number.isNaN(Date.parse(value))
 }
 
+function isBatchCount(value: unknown): value is number {
+  return typeof value === 'number'
+    && Number.isSafeInteger(value)
+    && value >= MIN_BATCH_COUNT
+    && value <= MAX_BATCH_COUNT
+}
+
 function parsePending(value: unknown): PendingOperation | null {
   if (!isRecord(value)
-    || value.version !== 1
+    || (value.version !== 1 && value.version !== 2)
     || !isNonEmptyString(value.operation_id)
     || !isPositiveAmount(value.amount)
     || typeof value.state !== 'string') return null
 
+  const count = value.version === 1 ? 1 : value.count
+  if (!isBatchCount(count)) return null
+  const commonKeys = value.version === 1
+    ? ['version', 'operation_id', 'amount', 'state']
+    : ['version', 'operation_id', 'amount', 'count', 'state']
+
   if (value.state === 'preparing') {
-    if (!hasOnlyKeys(value, ['version', 'operation_id', 'amount', 'state'])) return null
+    if (!hasOnlyKeys(value, commonKeys)) return null
     return {
-      version: 1,
+      version: 2,
       operation_id: value.operation_id,
       amount: value.amount,
+      count,
       state: 'preparing',
     }
   }
 
   if (value.state === 'ready' || value.state === 'pending') {
-    if (!hasOnlyKeys(value, [
-      'version', 'operation_id', 'amount', 'state', 'operation_token', 'expires_at',
-    ]) || !isNonEmptyString(value.operation_token) || !isDate(value.expires_at)) return null
+    if (!hasOnlyKeys(value, [...commonKeys, 'operation_token', 'expires_at'])
+      || !isNonEmptyString(value.operation_token)
+      || !isDate(value.expires_at)) return null
     return {
-      version: 1,
+      version: 2,
       operation_id: value.operation_id,
       amount: value.amount,
+      count,
       state: value.state,
       operation_token: value.operation_token,
       expires_at: value.expires_at,
@@ -80,13 +96,12 @@ function parsePending(value: unknown): PendingOperation | null {
   }
 
   if (value.state === 'expired') {
-    if (!hasOnlyKeys(value, [
-      'version', 'operation_id', 'amount', 'state', 'expires_at',
-    ]) || !isDate(value.expires_at)) return null
+    if (!hasOnlyKeys(value, [...commonKeys, 'expires_at']) || !isDate(value.expires_at)) return null
     return {
-      version: 1,
+      version: 2,
       operation_id: value.operation_id,
       amount: value.amount,
+      count,
       state: 'expired',
       expires_at: value.expires_at,
     }
@@ -97,15 +112,55 @@ function parsePending(value: unknown): PendingOperation | null {
 
 function parseHistoryItem(value: unknown): HistoryItem | null {
   if (!isRecord(value)
-    || !hasOnlyKeys(value, ['version', 'operation_id', 'amount', 'code', 'created_at'])
-    || value.version !== 1
+    || (value.version !== 1 && value.version !== 2)
     || !isNonEmptyString(value.operation_id)
     || !isPositiveAmount(value.amount)
     || !isNonEmptyString(value.code)
     || !isBoundedString(value.created_at, 128)) return null
+
+  if (value.version === 1) {
+    if (!hasOnlyKeys(value, ['version', 'operation_id', 'amount', 'code', 'created_at'])) return null
+    return {
+      version: 2,
+      history_id: value.operation_id,
+      operation_id: value.operation_id,
+      batch_index: 1,
+      batch_size: 1,
+      amount: value.amount,
+      code: value.code,
+      created_at: value.created_at,
+    }
+  }
+
+  if (!hasOnlyKeys(value, [
+    'version',
+    'history_id',
+    'operation_id',
+    'batch_index',
+    'batch_size',
+    'amount',
+    'code',
+    'created_at',
+  ])
+    || !isNonEmptyString(value.history_id)
+    || !isBatchCount(value.batch_size)
+    || typeof value.batch_index !== 'number'
+    || !Number.isSafeInteger(value.batch_index)
+    || value.batch_index < 1
+    || value.batch_index > value.batch_size) return null
+
+  const batchHistoryId = `${value.operation_id}:${value.batch_index}`
+  const legacyHistoryId = value.batch_index === 1
+    && value.batch_size === 1
+    && value.history_id === value.operation_id
+  if (value.history_id !== batchHistoryId && !legacyHistoryId) return null
+
   return {
-    version: 1,
+    version: 2,
+    history_id: value.history_id,
     operation_id: value.operation_id,
+    batch_index: value.batch_index,
+    batch_size: value.batch_size,
     amount: value.amount,
     code: value.code,
     created_at: value.created_at,
@@ -151,6 +206,7 @@ export function loadPending(): PendingOperation | null {
   if (raw === undefined) return null
   const pending = parsePending(raw)
   if (pending === null && !remove(PENDING_KEY)) throw new StorageAccessError()
+  if (pending !== null && JSON.stringify(pending) !== JSON.stringify(raw)) write(PENDING_KEY, pending)
   return pending
 }
 
@@ -166,12 +222,12 @@ export function clearPending(): boolean {
 function normalizeStoredHistory(raw: unknown): HistoryItem[] | null {
   if (!Array.isArray(raw)) return null
   const result: HistoryItem[] = []
-  const operations = new Set<string>()
+  const historyIds = new Set<string>()
   for (const value of raw) {
     const item = parseHistoryItem(value)
     if (item === null) return null
-    if (operations.has(item.operation_id)) continue
-    operations.add(item.operation_id)
+    if (historyIds.has(item.history_id)) continue
+    historyIds.add(item.history_id)
     result.push(item)
     if (result.length === HISTORY_LIMIT) break
   }
@@ -192,12 +248,12 @@ export function loadHistory(): HistoryItem[] {
 
 export function saveHistory(history: HistoryItem[]): boolean {
   const newestFirst: HistoryItem[] = []
-  const operations = new Set<string>()
+  const historyIds = new Set<string>()
   for (let index = history.length - 1; index >= 0; index -= 1) {
     const item = parseHistoryItem(history[index])
     if (item === null) return false
-    if (operations.has(item.operation_id)) continue
-    operations.add(item.operation_id)
+    if (historyIds.has(item.history_id)) continue
+    historyIds.add(item.history_id)
     newestFirst.push(item)
     if (newestFirst.length === HISTORY_LIMIT) break
   }
