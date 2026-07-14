@@ -58,9 +58,9 @@ test('copies a completed code without clipboard-write delegation from the parent
   await tool.getByLabel('兑换金额').fill('10')
   await tool.getByRole('button', { name: '生成兑换码', exact: true }).click()
   await tool.getByTestId('confirm-conversion').click()
-  await expect(tool.locator('.code-row code')).toHaveText('TEST-CODE-1')
+  await expect(tool.locator('.result-code-list .code-row code')).toHaveText('TEST-CODE-1')
 
-  await tool.getByRole('button', { name: '复制兑换码', exact: true }).first().click()
+  await tool.getByLabel('复制兑换码 TEST-CODE-1').first().click()
 
   await expect(tool.getByText('已复制', { exact: true })).toBeVisible()
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('TEST-CODE-1')

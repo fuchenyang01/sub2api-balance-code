@@ -20,7 +20,13 @@ async function copy(text: string, success: string): Promise<void> {
 
 function copyAll(): Promise<void> {
   const text = props.items
-    .map((item) => [item.operation_id, item.amount, item.code, item.created_at].join('\t'))
+    .map((item) => [
+      item.operation_id,
+      `${item.batch_index}/${item.batch_size}`,
+      item.amount,
+      item.code,
+      item.created_at,
+    ].join('\t'))
     .join('\n')
   return copy(text, '已复制全部记录')
 }
@@ -65,11 +71,12 @@ function confirmClear(): void {
     <div v-else class="history-table-wrap">
       <table class="history-table">
         <thead>
-          <tr><th>兑换码</th><th>金额</th><th>操作编号</th><th>时间</th><th><span class="visually-hidden">操作</span></th></tr>
+          <tr><th>兑换码</th><th>批次</th><th>面值</th><th>操作编号</th><th>时间</th><th><span class="visually-hidden">操作</span></th></tr>
         </thead>
         <tbody>
-          <tr v-for="item in items" :key="item.operation_id">
+          <tr v-for="item in items" :key="item.history_id">
             <td><code>{{ item.code }}</code></td>
+            <td>{{ item.batch_index }}/{{ item.batch_size }}</td>
             <td>{{ item.amount }}</td>
             <td class="operation-id">{{ item.operation_id }}</td>
             <td>{{ displayTime(item.created_at) }}</td>
@@ -89,7 +96,7 @@ function confirmClear(): void {
       </table>
 
       <ul class="history-mobile-list">
-        <li v-for="item in items" :key="item.operation_id">
+        <li v-for="item in items" :key="item.history_id">
           <div class="history-mobile-code">
             <code>{{ item.code }}</code>
             <button
@@ -103,7 +110,8 @@ function confirmClear(): void {
             </button>
           </div>
           <dl>
-            <div><dt>金额</dt><dd>{{ item.amount }}</dd></div>
+            <div><dt>批次</dt><dd>{{ item.batch_index }}/{{ item.batch_size }}</dd></div>
+            <div><dt>面值</dt><dd>{{ item.amount }}</dd></div>
             <div><dt>操作编号</dt><dd class="operation-id">{{ item.operation_id }}</dd></div>
             <div><dt>时间</dt><dd>{{ displayTime(item.created_at) }}</dd></div>
           </dl>

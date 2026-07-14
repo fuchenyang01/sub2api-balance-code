@@ -29,19 +29,30 @@ export interface MeResponse {
   balance: string
 }
 
+export const MIN_BATCH_COUNT = 1
+export const MAX_BATCH_COUNT = 100
+
 export interface PrepareRequest {
   operation_id: string
   amount: string
+  count: number
 }
 
 export interface PrepareResponse {
   operation_token: string
   expires_at: string
   amount: string
+  count: number
+  total_amount: string
 }
 
 export interface ExecuteRequest {
   operation_token: string
+}
+
+export interface CompletedCode {
+  code: string
+  created_at: string
 }
 
 export type ExecuteResponse =
@@ -49,7 +60,8 @@ export type ExecuteResponse =
       status: 'completed'
       operation_id: string
       amount: string
-      code: string
-      created_at: string
+      count: number
+      total_amount: string
+      codes: CompletedCode[]
     }
   | { status: 'pending'; operation_id: string; error: ErrorCode }

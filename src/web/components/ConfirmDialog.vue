@@ -5,6 +5,8 @@ import { Check, X } from 'lucide-vue-next'
 const props = defineProps<{
   open: boolean
   amount: string
+  count: number
+  totalAmount: string
   busy: boolean
 }>()
 
@@ -118,8 +120,9 @@ onBeforeUnmount(() => {
       </div>
 
       <dl class="confirmation-list">
-        <div><dt>扣除余额</dt><dd>{{ amount }}</dd></div>
-        <div><dt>兑换码面值</dt><dd>{{ amount }}</dd></div>
+        <div><dt>单码面值</dt><dd>{{ amount }}</dd></div>
+        <div><dt>数量</dt><dd>{{ count }}</dd></div>
+        <div><dt>总扣款</dt><dd>{{ totalAmount }}</dd></div>
         <div><dt>兑换比例</dt><dd>1:1</dd></div>
         <div><dt>有效期</dt><dd>永久有效</dd></div>
       </dl>

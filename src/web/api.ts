@@ -2,6 +2,8 @@ import { Decimal } from 'decimal.js'
 import { z } from 'zod'
 
 import {
+  MAX_BATCH_COUNT,
+  MIN_BATCH_COUNT,
   errorCodes,
   type ErrorCode,
   type ExecuteRequest,
@@ -51,15 +53,30 @@ const prepareResponseSchema = z.object({
   operation_token: z.string().min(1),
   expires_at: isoDateSchema,
   amount: amountSchema,
+  count: z.number().int().min(MIN_BATCH_COUNT).max(MAX_BATCH_COUNT),
+  total_amount: amountSchema,
 }).strict()
-const executeResponseSchema = z.discriminatedUnion('status', [
-  z.object({
+const completedCodeSchema = z.object({
+  code: z.string().min(1),
+  created_at: completedTimeSchema,
+}).strict()
+const completedResponseSchema = z.object({
     status: z.literal('completed'),
     operation_id: z.string().min(1),
     amount: amountSchema,
-    code: z.string().min(1),
-    created_at: completedTimeSchema,
-  }).strict(),
+    count: z.number().int().min(MIN_BATCH_COUNT).max(MAX_BATCH_COUNT),
+    total_amount: amountSchema,
+    codes: z.array(completedCodeSchema).min(MIN_BATCH_COUNT).max(MAX_BATCH_COUNT),
+  }).strict().refine((value) => {
+    try {
+      return value.codes.length === value.count
+        && new Decimal(value.amount).mul(value.count).equals(value.total_amount)
+    } catch {
+      return false
+    }
+  })
+const executeResponseSchema = z.union([
+  completedResponseSchema,
   z.object({
     status: z.literal('pending'),
     operation_id: z.string().min(1),

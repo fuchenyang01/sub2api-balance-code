@@ -19,6 +19,8 @@ export interface MockSub2Api {
   readonly userToken: string
   setMode(mode: MockMode): void
   setIframeChildUrl(url: string): void
+  totalGenerateRequests(): number
+  totalDebitRequests(): number
   totalSuccessfulDebits(): number
   totalDeletedCodes(): number
   close(): Promise<void>
@@ -73,12 +75,14 @@ export async function startMockSub2Api(): Promise<MockSub2Api> {
   let balance = 100
   let nextCodeId = 1
   let successfulDebits = 0
+  let generateRequests = 0
+  let debitRequests = 0
   let deletedCodes = 0
   let iframeChildUrl: string | null = null
   let closing: Promise<void> | null = null
   const userToken = createTestJwt()
   const codes = new Map<number, RedeemCode>()
-  const generated = new Map<string, RedeemCode>()
+  const generated = new Map<string, RedeemCode[]>()
   const debits = new Map<string, Record<string, never>>()
 
   const server = createServer((request, response) => {
@@ -122,32 +126,54 @@ export async function startMockSub2Api(): Promise<MockSub2Api> {
     }
 
     if (request.method === 'POST' && url.pathname === '/api/v1/admin/redeem-codes/generate') {
+      generateRequests += 1
       const key = request.headers['idempotency-key']
       const body = await readJson(request)
       if (typeof key !== 'string' || !key.startsWith('code-') || !isRecord(body)
-        || body.count !== 1 || body.type !== 'balance' || typeof body.value !== 'number') {
+        || typeof body.count !== 'number' || !Number.isInteger(body.count)
+        || body.count < 1 || body.count > 100
+        || body.type !== 'balance' || typeof body.value !== 'number') {
         json(response, 400, { code: 1, message: 'invalid generate request' })
         return
       }
       const replay = generated.get(key)
       if (replay !== undefined) {
         response.setHeader('x-idempotency-replayed', 'true')
-        success(response, [replay])
+        success(response, replay)
         return
       }
-      const code: RedeemCode = {
-        id: nextCodeId,
-        code: `TEST-CODE-${nextCodeId}`,
-        type: 'balance',
-        value: body.value,
-        status: 'unused',
-        used_by: null,
-        created_at: '2026-07-14T00:00:00.000Z',
+      const batch = Array.from({ length: body.count }, (): RedeemCode => {
+        const code: RedeemCode = {
+          id: nextCodeId,
+          code: `TEST-CODE-${nextCodeId}`,
+          type: 'balance',
+          value: body.value as number,
+          status: 'unused',
+          used_by: null,
+          created_at: '2026-07-14T00:00:00.000Z',
+        }
+        nextCodeId += 1
+        codes.set(code.id, code)
+        return code
+      })
+      generated.set(key, batch)
+      success(response, batch)
+      return
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/v1/admin/redeem-codes/batch-delete') {
+      const body = await readJson(request)
+      if (!isRecord(body) || !Array.isArray(body.ids)
+        || body.ids.some((id) => typeof id !== 'number' || !Number.isInteger(id) || id <= 0)) {
+        json(response, 400, { code: 1, message: 'invalid batch delete request' })
+        return
       }
-      nextCodeId += 1
-      codes.set(code.id, code)
-      generated.set(key, code)
-      success(response, [code])
+      let deleted = 0
+      for (const id of body.ids) {
+        if (codes.delete(id as number)) deleted += 1
+      }
+      deletedCodes += deleted
+      success(response, { deleted })
       return
     }
 
@@ -170,6 +196,7 @@ export async function startMockSub2Api(): Promise<MockSub2Api> {
 
     const debitMatch = /^\/api\/v1\/admin\/users\/(\d+)\/balance$/.exec(url.pathname)
     if (debitMatch !== null && request.method === 'POST') {
+      debitRequests += 1
       const key = request.headers['idempotency-key']
       const body = await readJson(request)
       if (Number(debitMatch[1]) !== USER_ID || typeof key !== 'string' || !key.startsWith('debit-')
@@ -220,6 +247,8 @@ export async function startMockSub2Api(): Promise<MockSub2Api> {
     userToken,
     setMode: (nextMode) => { mode = nextMode },
     setIframeChildUrl: (url) => { iframeChildUrl = url },
+    totalGenerateRequests: () => generateRequests,
+    totalDebitRequests: () => debitRequests,
     totalSuccessfulDebits: () => successfulDebits,
     totalDeletedCodes: () => deletedCodes,
     close: () => {
@@ -230,6 +259,8 @@ export async function startMockSub2Api(): Promise<MockSub2Api> {
         debits.clear()
         balance = 100
         successfulDebits = 0
+        generateRequests = 0
+        debitRequests = 0
         deletedCodes = 0
         iframeChildUrl = null
       })()

@@ -1,16 +1,19 @@
 import { z } from 'zod'
 
-import { isUpstreamError, requestUpstream } from './http.js'
+import { MAX_BATCH_COUNT } from '../../shared/contracts.js'
+import { isUpstreamError, requestUpstream, UpstreamError } from './http.js'
 import { redeemCodeSchema, type RedeemCode } from './types.js'
 
 export interface AdminClient {
-  generateCode(operationId: string, amount: number): Promise<RedeemCode>
+  generateCodes(operationId: string, amount: number, count: number): Promise<RedeemCode[]>
+  batchDeleteCodes(ids: number[]): Promise<number>
   getCode(id: number): Promise<RedeemCode | null>
   deleteCode(id: number): Promise<'deleted' | 'missing'>
   debitBalance(userId: number, operationId: string, amount: number): Promise<void>
 }
 
-const generatedCodesSchema = z.array(redeemCodeSchema).length(1)
+const generatedCodesSchema = z.array(redeemCodeSchema).min(1).max(MAX_BATCH_COUNT)
+const batchDeleteResultSchema = z.object({ deleted: z.number().int().nonnegative() }).strict()
 const emptyDataSchema = z.object({})
 
 export class Sub2ApiAdminClient implements AdminClient {
@@ -31,16 +34,32 @@ export class Sub2ApiAdminClient implements AdminClient {
     this.#fetchImpl = fetchImpl
   }
 
-  async generateCode(operationId: string, amount: number): Promise<RedeemCode> {
+  async generateCodes(operationId: string, amount: number, count: number): Promise<RedeemCode[]> {
     const codes = await this.#request('/api/v1/admin/redeem-codes/generate', generatedCodesSchema, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Idempotency-Key': `code-${operationId}`,
       },
-      body: JSON.stringify({ count: 1, type: 'balance', value: amount }),
+      body: JSON.stringify({ count, type: 'balance', value: amount }),
     })
-    return codes[0]!
+    if (codes.length !== count) {
+      throw new UpstreamError('invalid-response', 'generated code count mismatch')
+    }
+    return codes
+  }
+
+  async batchDeleteCodes(ids: number[]): Promise<number> {
+    const result = await this.#request(
+      '/api/v1/admin/redeem-codes/batch-delete',
+      batchDeleteResultSchema,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids }),
+      },
+    )
+    return result.deleted
   }
 
   async getCode(id: number): Promise<RedeemCode | null> {

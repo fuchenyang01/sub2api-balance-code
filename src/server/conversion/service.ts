@@ -1,6 +1,11 @@
 import { Decimal } from 'decimal.js'
 
-import type { ExecuteResponse, PrepareResponse } from '../../shared/contracts.js'
+import {
+  MAX_BATCH_COUNT,
+  MIN_BATCH_COUNT,
+  type ExecuteResponse,
+  type PrepareResponse,
+} from '../../shared/contracts.js'
 import { amountToUpstreamNumber, normalizeAmount, parseAmount } from '../amount.js'
 import { AppError } from '../errors.js'
 import type { OperationPayload, SecretsService } from '../security/secrets.js'
@@ -68,9 +73,37 @@ function executionProfileFailure(error: unknown): AppError {
   return new AppError('UPSTREAM_UNAVAILABLE', 502, '上游服务不可用')
 }
 
-function validateCode(code: RedeemCode, amount: Decimal): void {
-  if (code.type !== 'balance' || !new Decimal(code.value).equals(amount)) {
-    throw new AppError('UPSTREAM_DATA_CONFLICT', 502, '上游兑换码数据冲突')
+function validBatchCount(count: number): boolean {
+  return Number.isSafeInteger(count) && count >= MIN_BATCH_COUNT && count <= MAX_BATCH_COUNT
+}
+
+function isValidGeneratedBatch(
+  codes: RedeemCode[],
+  amount: Decimal,
+  expectedCount: number,
+): boolean {
+  if (codes.length !== expectedCount) return false
+
+  const ids = new Set<number>()
+  const values = new Set<string>()
+  try {
+    for (const code of codes) {
+      if (code.type !== 'balance' || !new Decimal(code.value).equals(amount)) return false
+      if (ids.has(code.id) || values.has(code.code)) return false
+      ids.add(code.id)
+      values.add(code.code)
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
+function manualReview(operationId: string): ExecuteResponse {
+  return {
+    status: 'pending',
+    operation_id: operationId,
+    error: 'MANUAL_REVIEW_REQUIRED',
   }
 }
 
@@ -97,15 +130,20 @@ export class ConversionService {
     userId: number,
     operationId: string,
     rawAmount: string,
+    count: number,
   ): Promise<PrepareResponse> {
+    if (!validBatchCount(count)) {
+      throw new AppError('AMOUNT_INVALID', 400, '数量格式无效')
+    }
     const normalizedAmount = normalizeAmount(rawAmount)
     const amount = new Decimal(normalizedAmount)
+    const totalAmount = amount.mul(count)
     const profile = await this.#users.getProfile(userJwt)
 
     if (profile.id !== userId) {
       throw new AppError('SESSION_INVALID', 401, '会话用户不一致')
     }
-    if (amount.gt(profile.balance)) {
+    if (totalAmount.gt(profile.balance)) {
       throw new AppError('AMOUNT_EXCEEDS_BALANCE', 409, '金额超过当前余额')
     }
 
@@ -113,11 +151,14 @@ export class ConversionService {
       operationId,
       userId,
       amount: normalizedAmount,
+      count,
     })
     return {
       operation_token: signed.token,
       expires_at: signed.expiresAt,
       amount: normalizedAmount,
+      count,
+      total_amount: totalAmount.toFixed(),
     }
   }
 
@@ -134,8 +175,13 @@ export class ConversionService {
   }
 
   async #executeLocked(operation: OperationPayload, userJwt: string): Promise<ExecuteResponse> {
+    if (!validBatchCount(operation.count)) {
+      throw new AppError('OPERATION_TOKEN_INVALID', 401, '操作令牌无效')
+    }
     const amount = parseAmount(operation.amount)
+    const totalAmount = amount.mul(operation.count)
     const upstreamAmount = amountToUpstreamNumber(amount)
+    const upstreamTotal = amountToUpstreamNumber(totalAmount)
     let profile: Awaited<ReturnType<UserClient['getProfile']>>
 
     try {
@@ -147,31 +193,28 @@ export class ConversionService {
       throw new AppError('SESSION_INVALID', 401, '会话用户不一致')
     }
 
-    let generated: RedeemCode
+    let generated: RedeemCode[]
 
     try {
-      generated = await this.#admin.generateCode(operation.operationId, upstreamAmount)
+      generated = await this.#admin.generateCodes(
+        operation.operationId,
+        upstreamAmount,
+        operation.count,
+      )
     } catch (error) {
       if (isUncertain(error)) return pending(operation.operationId, error)
       throw upstreamFailure(error)
     }
 
-    let stored: RedeemCode | null
-    try {
-      stored = await this.#admin.getCode(generated.id)
-    } catch (error) {
-      if (isUncertain(error)) return pending(operation.operationId, error)
-      throw upstreamFailure(error)
+    if (!isValidGeneratedBatch(generated, amount, operation.count)) {
+      return manualReview(operation.operationId)
     }
-    if (stored === null) throw terminated()
-
-    validateCode(stored, amount)
 
     try {
-      await this.#admin.debitBalance(operation.userId, operation.operationId, upstreamAmount)
+      await this.#admin.debitBalance(operation.userId, operation.operationId, upstreamTotal)
     } catch (error) {
       if (isUpstreamError(error, 'insufficient-balance')) {
-        return this.#compensate(operation.operationId, stored.id, amount)
+        return this.#compensate(operation.operationId, generated)
       }
       if (isUncertain(error)) return pending(operation.operationId, error)
       throw upstreamFailure(error)
@@ -181,51 +224,25 @@ export class ConversionService {
       status: 'completed',
       operation_id: operation.operationId,
       amount: operation.amount,
-      code: stored.code,
-      created_at: stored.created_at,
+      count: operation.count,
+      total_amount: totalAmount.toFixed(),
+      codes: generated.map(({ code, created_at }) => ({ code, created_at })),
     }
   }
 
   async #compensate(
     operationId: string,
-    codeId: number,
-    amount: Decimal,
+    generated: RedeemCode[],
   ): Promise<ExecuteResponse> {
-    let latest: RedeemCode | null
+    let deleted: number
     try {
-      latest = await this.#admin.getCode(codeId)
+      deleted = await this.#admin.batchDeleteCodes(generated.map(({ id }) => id))
     } catch (error) {
       if (isUncertain(error)) return pending(operationId, error)
       throw upstreamFailure(error)
     }
 
-    if (latest === null) throw terminated()
-    validateCode(latest, amount)
-    if (latest.status !== 'unused' || latest.used_by !== null) {
-      return {
-        status: 'pending',
-        operation_id: operationId,
-        error: 'MANUAL_REVIEW_REQUIRED',
-      }
-    }
-
-    // Upstream DELETE is unconditional; this recheck narrows but cannot eliminate the TOCTOU window.
-    try {
-      await this.#admin.deleteCode(codeId)
-      throw terminated()
-    } catch (error) {
-      if (error instanceof AppError) throw error
-      if (!isUncertain(error)) throw upstreamFailure(error)
-
-      try {
-        const remaining = await this.#admin.getCode(codeId)
-        if (remaining === null) throw terminated()
-      } catch (lookupError) {
-        if (lookupError instanceof AppError) throw lookupError
-        if (!isUncertain(lookupError)) throw upstreamFailure(lookupError)
-      }
-
-      return { status: 'pending', operation_id: operationId, error: 'CONVERSION_PENDING' }
-    }
+    if (deleted === generated.length) throw terminated()
+    return manualReview(operationId)
   }
 }

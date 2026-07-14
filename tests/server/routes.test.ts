@@ -68,7 +68,7 @@ class FakeUsers implements UserClient {
 }
 
 class FakeConversions {
-  prepareCalls: Array<[string, number, string, string]> = []
+  prepareCalls: Array<[string, number, string, string, number]> = []
   executeCalls: Array<[string, string, number]> = []
   prepareError: unknown
   executeError: unknown
@@ -76,8 +76,9 @@ class FakeConversions {
     status: 'completed',
     operation_id: operationId,
     amount: '12.5',
-    code: 'REDEEM-SECRET-CODE',
-    created_at: '2026-07-13T00:00:00.000Z',
+    count: 1,
+    total_amount: '12.5',
+    codes: [{ code: 'REDEEM-SECRET-CODE', created_at: '2026-07-13T00:00:00.000Z' }],
   }
 
   async prepare(
@@ -85,13 +86,16 @@ class FakeConversions {
     userId: number,
     requestedOperationId: string,
     amount: string,
+    count: number,
   ): Promise<PrepareResponse> {
-    this.prepareCalls.push([userJwt, userId, requestedOperationId, amount])
+    this.prepareCalls.push([userJwt, userId, requestedOperationId, amount, count])
     if (this.prepareError !== undefined) throw this.prepareError
     return {
       operation_token: 'signed-operation-token',
       expires_at: '2026-07-13T01:00:00.000Z',
       amount,
+      count,
+      total_amount: amount,
     }
   }
 
@@ -426,9 +430,10 @@ describe('origin and schemas', () => {
   })
 
   it.each([
-    [{ operation_id: 'not-v4', amount: '1' }, 'AMOUNT_INVALID'],
-    [{ operation_id: operationId, amount: 1 }, 'AMOUNT_INVALID'],
-    [{ operation_id: operationId, amount: '1', user_id: 999 }, 'AMOUNT_INVALID'],
+    [{ operation_id: 'not-v4', amount: '1', count: 1 }, 'AMOUNT_INVALID'],
+    [{ operation_id: operationId, amount: 1, count: 1 }, 'AMOUNT_INVALID'],
+    [{ operation_id: operationId, amount: '1', count: 1, user_id: 999 }, 'AMOUNT_INVALID'],
+    [{ operation_id: operationId, amount: '1' }, 'AMOUNT_INVALID'],
   ])('rejects invalid prepare body %#', async (payload, code) => {
     const { app } = await setup()
     const cookie = await cookieFor(app)
@@ -494,16 +499,49 @@ describe('protected conversions', () => {
       method: 'POST',
       url: '/api/conversions/prepare?user_id=999',
       headers: { origin: appOrigin, cookie },
-      payload: { operation_id: operationId, amount: '12.50' },
+      payload: { operation_id: operationId, amount: '12.50', count: 1 },
     })
 
     expect(response.statusCode).toBe(200)
-    expect(conversions.prepareCalls).toEqual([[userJwt, 7, operationId, '12.50']])
+    expect(conversions.prepareCalls).toEqual([[userJwt, 7, operationId, '12.50', 1]])
     expect(response.json()).toEqual({
       operation_token: 'signed-operation-token',
       expires_at: '2026-07-13T01:00:00.000Z',
       amount: '12.50',
+      count: 1,
+      total_amount: '12.50',
     })
+  })
+
+  it.each([0, 101, 1.5, '2', null])('rejects invalid prepare count %s', async (count) => {
+    const { app, conversions } = await setup()
+    const userJwt = jwt()
+    const cookie = await cookieFor(app, userJwt)
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/conversions/prepare',
+      headers: { origin: appOrigin, cookie },
+      payload: { operation_id: operationId, amount: '1', count },
+    })
+
+    expect(response.statusCode).toBe(400)
+    stableError(response, 'AMOUNT_INVALID')
+    expect(conversions.prepareCalls).toHaveLength(0)
+  })
+
+  it('passes one batch count without multiplying rate-limit usage', async () => {
+    const { app, conversions } = await setup()
+    const userJwt = jwt()
+    const cookie = await cookieFor(app, userJwt)
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/conversions/prepare',
+      headers: { origin: appOrigin, cookie },
+      payload: { operation_id: operationId, amount: '1', count: 100 },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(conversions.prepareCalls).toEqual([[userJwt, 7, operationId, '1', 100]])
   })
 
   it.each([
@@ -520,8 +558,9 @@ describe('protected conversions', () => {
             status: 'completed',
             operation_id: operationId,
             amount: '12.5',
-            code: 'REDEEM-SECRET-CODE',
-            created_at: '2026-07-13T00:00:00.000Z',
+            count: 1,
+            total_amount: '12.5',
+            codes: [{ code: 'REDEEM-SECRET-CODE', created_at: '2026-07-13T00:00:00.000Z' }],
           }
 
     const response = await app.inject({
@@ -559,7 +598,7 @@ describe('protected conversions', () => {
       method: 'POST',
       url: '/api/conversions/prepare',
       headers: { origin: appOrigin, cookie },
-      payload: { operation_id: operationId, amount: '1' },
+      payload: { operation_id: operationId, amount: '1', count: 1 },
     })
 
     expect(response.statusCode).toBe(status)
@@ -632,7 +671,7 @@ describe('security headers, rate limits, and logging', () => {
       method: 'POST',
       url: '/api/conversions/prepare',
       headers: { origin: appOrigin, cookie },
-      payload: { operation_id: operationId, amount: '1' },
+      payload: { operation_id: operationId, amount: '1', count: 1 },
     })
     const execute = await app.inject({
       method: 'POST',
@@ -645,7 +684,7 @@ describe('security headers, rate limits, and logging', () => {
   })
 
   it('keeps prepare and execute rate-limit budgets independent in both directions', async () => {
-    const prepareRequest = { operation_id: operationId, amount: '1' }
+    const prepareRequest = { operation_id: operationId, amount: '1', count: 1 }
     const executeRequest = { operation_token: 'operation-token' }
     const send = (
       app: FastifyInstance,
@@ -682,7 +721,7 @@ describe('security headers, rate limits, and logging', () => {
   })
 
   it.each([
-    ['prepare', { operation_id: operationId, amount: '1' }],
+    ['prepare', { operation_id: operationId, amount: '1', count: 1 }],
     ['execute', { operation_token: 'operation-token' }],
   ] as const)('applies the %s user limit before upstream profile revalidation', async (route, payload) => {
     const { app, users } = await setup()
@@ -713,7 +752,7 @@ describe('security headers, rate limits, and logging', () => {
       method: 'POST',
       url: '/api/conversions/prepare',
       headers: { origin: appOrigin },
-      payload: { operation_id: operationId, amount: '1' },
+      payload: { operation_id: operationId, amount: '1', count: 1 },
     })
 
     for (let count = 0; count < 30; count += 1) {
@@ -751,7 +790,7 @@ describe('security headers, rate limits, and logging', () => {
       method: 'POST',
       url: '/api/conversions/prepare',
       headers: { origin: appOrigin, cookie },
-      payload: { operation_id: operationId, amount: '1' },
+      payload: { operation_id: operationId, amount: '1', count: 1 },
     })
 
     for (let count = 0; count < 10; count += 1) {
