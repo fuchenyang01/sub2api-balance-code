@@ -3,6 +3,7 @@ import { ref, watch } from 'vue'
 import { CheckCircle2, Clock3, Copy } from 'lucide-vue-next'
 
 import type { ExecuteResponse } from '../../shared/contracts.js'
+import { copyText } from '../clipboard.js'
 
 type CompletedResult = Extract<ExecuteResponse, { status: 'completed' }>
 type PendingResult = Extract<ExecuteResponse, { status: 'pending' }>
@@ -23,12 +24,7 @@ watch(
 
 async function copyCode(): Promise<void> {
   if (props.result === null) return
-  try {
-    await navigator.clipboard.writeText(props.result.code)
-    copyState.value = 'success'
-  } catch {
-    copyState.value = 'error'
-  }
+  copyState.value = await copyText(props.result.code) ? 'success' : 'error'
 }
 
 function displayTime(value: string): string {

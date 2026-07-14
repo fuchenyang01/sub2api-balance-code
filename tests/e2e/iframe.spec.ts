@@ -41,3 +41,28 @@ test('exchanges the URL token across same-site origins and keeps the cookie usab
   await page.screenshot({ path: testInfo.outputPath('iframe.png'), fullPage: true })
   expectNoBrowserErrors(errors)
 })
+
+test('copies a completed code without clipboard-write delegation from the parent iframe', async ({
+  page,
+  context,
+  environment,
+}) => {
+  const errors = collectBrowserErrors(page)
+  await context.grantPermissions(['clipboard-read'], { origin: environment.mock.origin })
+  await page.goto(environment.iframeParentUrl())
+
+  expect(await page.locator('#tool-frame').getAttribute('allow')).toBeNull()
+  const tool = page.frameLocator('#tool-frame')
+  await expect(tool.getByText('测试用户')).toBeVisible()
+
+  await tool.getByLabel('兑换金额').fill('10')
+  await tool.getByRole('button', { name: '生成兑换码', exact: true }).click()
+  await tool.getByTestId('confirm-conversion').click()
+  await expect(tool.locator('.code-row code')).toHaveText('TEST-CODE-1')
+
+  await tool.getByRole('button', { name: '复制兑换码', exact: true }).first().click()
+
+  await expect(tool.getByText('已复制', { exact: true })).toBeVisible()
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('TEST-CODE-1')
+  expectNoBrowserErrors(errors)
+})

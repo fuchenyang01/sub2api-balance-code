@@ -3,6 +3,7 @@ import { Copy, Trash2 } from 'lucide-vue-next'
 import { ref } from 'vue'
 
 import type { HistoryItem } from '../../shared/storage-types.js'
+import { copyText } from '../clipboard.js'
 
 const props = defineProps<{ items: HistoryItem[] }>()
 const emit = defineEmits<{ clear: [] }>()
@@ -14,12 +15,7 @@ function displayTime(value: string): string {
 }
 
 async function copy(text: string, success: string): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(text)
-    copyStatus.value = success
-  } catch {
-    copyStatus.value = '复制失败，请手动复制'
-  }
+  copyStatus.value = await copyText(text) ? success : '复制失败，请手动复制'
 }
 
 function copyAll(): Promise<void> {

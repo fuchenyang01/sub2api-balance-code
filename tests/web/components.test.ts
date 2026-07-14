@@ -34,6 +34,12 @@ const appController = vi.hoisted((): {
   storageReady: true,
 }))
 
+const clipboardController = vi.hoisted(() => ({ copyText: vi.fn() }))
+
+vi.mock('../../src/web/clipboard.js', () => ({
+  copyText: clipboardController.copyText,
+}))
+
 vi.mock('../../src/web/composables/useConversion.js', async (importOriginal) => {
   const { ref } = await import('vue')
   const actual = await importOriginal<typeof import('../../src/web/composables/useConversion.js')>()
@@ -67,6 +73,10 @@ import ConversionForm from '../../src/web/components/ConversionForm.vue'
 import ConversionResult from '../../src/web/components/ConversionResult.vue'
 import HistoryList from '../../src/web/components/HistoryList.vue'
 import PendingOperation from '../../src/web/components/PendingOperation.vue'
+
+beforeEach(() => {
+  clipboardController.copyText.mockReset()
+})
 
 describe('responsive stylesheet', () => {
   it('does not force body wider than a narrow iframe viewport', () => {
@@ -186,8 +196,7 @@ describe('ConfirmDialog', () => {
 
 describe('ConversionResult', () => {
   it('shows a completed code and copies it with accessible feedback', async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined)
-    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    clipboardController.copyText.mockResolvedValue(true)
     const wrapper = mount(ConversionResult, {
       props: {
         result: {
@@ -203,7 +212,7 @@ describe('ConversionResult', () => {
     expect(copy.attributes('title')).toBe('复制兑换码')
     await copy.trigger('click')
     await nextTick()
-    expect(writeText).toHaveBeenCalledWith('CODE-SECRET')
+    expect(clipboardController.copyText).toHaveBeenCalledWith('CODE-SECRET')
     expect(wrapper.text()).toContain('已复制')
 
     await wrapper.setProps({
@@ -214,6 +223,24 @@ describe('ConversionResult', () => {
     })
     await nextTick()
     expect(wrapper.text()).not.toContain('已复制')
+  })
+
+  it('shows manual-copy feedback when compatible copying fails', async () => {
+    clipboardController.copyText.mockResolvedValue(false)
+    const wrapper = mount(ConversionResult, {
+      props: {
+        result: {
+          status: 'completed', operation_id: 'op-copy-fail', amount: '1',
+          code: 'CODE-BLOCKED', created_at: '2026-07-14T00:00:00.000Z',
+        },
+        pending: null,
+      },
+    })
+
+    await wrapper.get('[aria-label="复制兑换码"]').trigger('click')
+    await nextTick()
+
+    expect(wrapper.text()).toContain('复制失败，请手动复制')
   })
 
   it('shows only safe pending details even if an unexpected code field is supplied', () => {
@@ -300,8 +327,7 @@ describe('HistoryList', () => {
   }]
 
   it('copies one code or all history with accessible icon actions', async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined)
-    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    clipboardController.copyText.mockResolvedValue(true)
     const wrapper = mount(HistoryList, { props: { items } })
 
     const copyOne = wrapper.get('[aria-label="复制兑换码 CODE-ONE"]')
@@ -309,9 +335,19 @@ describe('HistoryList', () => {
     await copyOne.trigger('click')
     await wrapper.get('[data-testid="copy-all-history"]').trigger('click')
 
-    expect(writeText).toHaveBeenNthCalledWith(1, 'CODE-ONE')
-    expect(writeText.mock.calls[1]?.[0]).toContain('op-1')
-    expect(writeText.mock.calls[1]?.[0]).toContain('CODE-ONE')
+    expect(clipboardController.copyText).toHaveBeenNthCalledWith(1, 'CODE-ONE')
+    expect(clipboardController.copyText.mock.calls[1]?.[0]).toContain('op-1')
+    expect(clipboardController.copyText.mock.calls[1]?.[0]).toContain('CODE-ONE')
+  })
+
+  it('shows manual-copy feedback when history copying fails', async () => {
+    clipboardController.copyText.mockResolvedValue(false)
+    const wrapper = mount(HistoryList, { props: { items } })
+
+    await wrapper.get('[aria-label="复制兑换码 CODE-ONE"]').trigger('click')
+    await nextTick()
+
+    expect(wrapper.text()).toContain('复制失败，请手动复制')
   })
 
   it('requires confirmation before emitting clear', async () => {
