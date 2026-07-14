@@ -11,6 +11,31 @@ import type { HistoryItem, PendingOperation } from '../../src/shared/storage-typ
 
 const profile = { id: 7, username: 'alice', balance: '12.50000000' }
 const operationId = '123e4567-e89b-42d3-a456-426614174000'
+const createdAt = '2026-07-14T00:00:00.000Z'
+const expiresAt = '2099-07-13T01:00:00.000Z'
+
+function batchCodes(count: number): Array<{ code: string; created_at: string }> {
+  return Array.from({ length: count }, (_, index) => ({
+    code: `CODE-${index + 1}`,
+    created_at: createdAt,
+  }))
+}
+
+function completedPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    status: 'completed',
+    operation_id: operationId,
+    amount: '2.5',
+    count: 2,
+    total_amount: '5',
+    codes: batchCodes(2),
+    ...overrides,
+  }
+}
+
+function fetchResponse(body: unknown): ReturnType<typeof vi.fn> {
+  return vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status: 200 }))
+}
 
 beforeEach(() => {
   localStorage.clear()
@@ -31,19 +56,124 @@ function api(overrides: Partial<ConversionApi> = {}): ConversionApi {
     logout: vi.fn().mockResolvedValue(undefined),
     prepare: vi.fn().mockResolvedValue({
       operation_token: 'operation-secret',
-      expires_at: '2099-07-13T01:00:00.000Z',
+      expires_at: expiresAt,
       amount: '1.25',
+      count: 1,
+      total_amount: '1.25',
     }),
     execute: vi.fn().mockResolvedValue({
       status: 'completed',
       operation_id: operationId,
       amount: '1.25',
-      code: 'CODE-123',
-      created_at: '2026-07-13T00:00:00.000Z',
+      count: 1,
+      total_amount: '1.25',
+      codes: [{ code: 'CODE-123', created_at: '2026-07-13T00:00:00.000Z' }],
     }),
     ...overrides,
   }
 }
+
+describe('batch conversion contracts', () => {
+  it('parses an exact completed batch', async () => {
+    const client = createApiClient(fetchResponse(completedPayload()))
+
+    await expect(client.execute({ operation_token: 'operation-secret' })).resolves.toMatchObject({
+      count: 2,
+      codes: [{ code: 'CODE-1' }, { code: 'CODE-2' }],
+    })
+  })
+
+  it.each([
+    { count: 2, codes: [{ code: 'ONLY-ONE', created_at: createdAt }] },
+    { count: 1, total_amount: '9', codes: [{ code: 'CODE-1', created_at: createdAt }] },
+  ])('rejects inconsistent completed batch %#', async (override) => {
+    const client = createApiClient(fetchResponse(completedPayload(override)))
+
+    const error = await client.execute({ operation_token: 'operation-secret' })
+      .catch((caught: unknown) => caught)
+
+    expect(error).toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' })
+  })
+
+  it('prepares and executes one batch then publishes every code and refreshes once', async () => {
+    vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(operationId)
+    const prepare = vi.fn().mockResolvedValue({
+      operation_token: 'operation-secret',
+      expires_at: expiresAt,
+      amount: '2.5',
+      count: 3,
+      total_amount: '7.5',
+    })
+    const execute = vi.fn().mockResolvedValue({
+      status: 'completed',
+      operation_id: operationId,
+      amount: '2.5',
+      count: 3,
+      total_amount: '7.5',
+      codes: batchCodes(3),
+    })
+    const me = vi.fn().mockResolvedValue({ ...profile, balance: '5' })
+    const store = storage()
+    const conversion = createUseConversion(api({ prepare, execute, me }), store)
+
+    await conversion.convert('2.5', 3)
+
+    expect(prepare).toHaveBeenCalledOnce()
+    expect(prepare).toHaveBeenCalledWith({ operation_id: operationId, amount: '2.5', count: 3 })
+    expect(execute).toHaveBeenCalledOnce()
+    expect(me).toHaveBeenCalledOnce()
+    expect(conversion.result.value?.codes).toHaveLength(3)
+    expect(conversion.history.value.filter((item) => item.operation_id === operationId)).toHaveLength(3)
+  })
+
+  it.each([
+    { count: 2, total_amount: '7.5' },
+    { count: 3, total_amount: '9' },
+  ])('does not execute when prepare returns inconsistent batch metadata %#', async (override) => {
+    vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(operationId)
+    const execute = vi.fn()
+    const prepare = vi.fn().mockResolvedValue(Object.assign({
+      operation_token: 'operation-secret',
+      expires_at: expiresAt,
+      amount: '2.5',
+      count: 3,
+      total_amount: '7.5',
+    }, override))
+    const conversion = createUseConversion(api({ prepare, execute }), storage())
+
+    await conversion.convert('2.5', 3)
+
+    expect(execute).not.toHaveBeenCalled()
+    expect(conversion.result.value).toBeNull()
+    expect(conversion.error.value).toMatchObject({ code: 'UPSTREAM_DATA_CONFLICT' })
+  })
+
+  it('does not expose any code or clear recovery when a batch history write fails', async () => {
+    vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(operationId)
+    const clearPending = vi.fn()
+    const saveHistory = vi.fn().mockReturnValue(false)
+    const conversion = createUseConversion(api({
+      prepare: vi.fn().mockResolvedValue({
+        operation_token: 'operation-secret', expires_at: expiresAt,
+        amount: '2.5', count: 3, total_amount: '7.5',
+      }),
+      execute: vi.fn().mockResolvedValue({
+        status: 'completed', operation_id: operationId,
+        amount: '2.5', count: 3, total_amount: '7.5', codes: batchCodes(3),
+      }),
+    }), storage({ saveHistory, clearPending }))
+
+    await conversion.convert('2.5', 3)
+
+    expect(saveHistory).toHaveBeenCalledOnce()
+    expect(clearPending).not.toHaveBeenCalled()
+    expect(conversion.result.value).toBeNull()
+    expect(conversion.history.value).toEqual([])
+    expect(conversion.pendingOperation.value).toMatchObject({
+      operation_id: operationId, count: 3, state: 'ready',
+    })
+  })
+})
 
 function storage(
   overrides: Partial<ConversionStorage> = {},
@@ -285,10 +415,14 @@ describe('useConversion conversion', () => {
     const prepareA = vi.fn().mockImplementation(async () => {
       enteredPrepare()
       await gate
-      return { operation_token: 'secret-a', expires_at: '2099-07-13T01:00:00.000Z', amount: '1' }
+      return {
+        operation_token: 'secret-a', expires_at: expiresAt,
+        amount: '1', count: 1, total_amount: '1',
+      }
     })
     const prepareB = vi.fn().mockResolvedValue({
-      operation_token: 'secret-b', expires_at: '2099-07-13T01:00:00.000Z', amount: '2',
+      operation_token: 'secret-b', expires_at: expiresAt,
+      amount: '2', count: 1, total_amount: '2',
     })
     const conversionA = createUseConversion(api({
       prepare: prepareA,
@@ -313,7 +447,7 @@ describe('useConversion conversion', () => {
 
   it('allows only one controller to resume the same shared token', async () => {
     const ready: PendingOperation = {
-      version: 1, operation_id: operationId, amount: '1', state: 'ready',
+      version: 2, operation_id: operationId, amount: '1', count: 1, state: 'ready',
       operation_token: 'shared-secret', expires_at: '2099-07-13T01:00:00.000Z',
     }
     const shared = sharedStorage(ready)
@@ -347,11 +481,11 @@ describe('useConversion conversion', () => {
 
   it('does not overwrite a newer shared operation while downgrading expired recovery', async () => {
     const expired: PendingOperation = {
-      version: 1, operation_id: operationId, amount: '1', state: 'ready',
+      version: 2, operation_id: operationId, amount: '1', count: 1, state: 'ready',
       operation_token: 'old-secret', expires_at: '2020-07-13T01:00:00.000Z',
     }
     const replacement: PendingOperation = {
-      version: 1, operation_id: 'new-operation', amount: '2', state: 'preparing',
+      version: 2, operation_id: 'new-operation', amount: '2', count: 1, state: 'preparing',
     }
     const shared = sharedStorage(expired)
     const coordinator: ConversionCoordinator = {
@@ -374,7 +508,7 @@ describe('useConversion conversion', () => {
 
   it('does not downgrade expired recovery while the cross-page lock is busy', async () => {
     const expired: PendingOperation = {
-      version: 1, operation_id: operationId, amount: '1', state: 'ready',
+      version: 2, operation_id: operationId, amount: '1', count: 1, state: 'ready',
       operation_token: 'old-secret', expires_at: '2020-07-13T01:00:00.000Z',
     }
     const shared = sharedStorage(expired)
@@ -414,7 +548,7 @@ describe('useConversion conversion', () => {
 
   it('requires an explicit refresh after hydration storage access fails', async () => {
     const existing: PendingOperation = {
-      version: 1, operation_id: 'existing-operation', amount: '1', state: 'preparing',
+      version: 2, operation_id: 'existing-operation', amount: '1', count: 1, state: 'preparing',
     }
     const randomUUID = vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(operationId)
     const prepare = vi.fn()
@@ -473,11 +607,11 @@ describe('useConversion conversion', () => {
 
   it('does not clear a different operation that appears before completed cleanup', async () => {
     const ready: PendingOperation = {
-      version: 1, operation_id: operationId, amount: '1', state: 'ready',
+      version: 2, operation_id: operationId, amount: '1', count: 1, state: 'ready',
       operation_token: 'shared-secret', expires_at: '2099-07-13T01:00:00.000Z',
     }
     const replacement: PendingOperation = {
-      version: 1, operation_id: 'other-operation', amount: '2', state: 'preparing',
+      version: 2, operation_id: 'other-operation', amount: '2', count: 1, state: 'preparing',
     }
     const shared = sharedStorage(ready)
     shared.store.saveHistory = vi.fn().mockImplementation(() => {
@@ -486,8 +620,8 @@ describe('useConversion conversion', () => {
     })
     const conversion = createUseConversion(api({
       execute: vi.fn().mockResolvedValue({
-        status: 'completed', operation_id: operationId, amount: '1', code: 'CODE-A',
-        created_at: 'upstream-time-value',
+        status: 'completed', operation_id: operationId, amount: '1', count: 1,
+        total_amount: '1', codes: [{ code: 'CODE-A', created_at: 'upstream-time-value' }],
       }),
     }), shared.store, exclusiveCoordinator())
     await conversion.initialize()
@@ -513,6 +647,8 @@ describe('useConversion conversion', () => {
           operation_token: 'operation-secret',
           expires_at: '2099-07-13T01:00:00.000Z',
           amount: request.amount,
+          count: request.count,
+          total_amount: request.amount,
         }
       }),
       execute: vi.fn().mockImplementation(async (request) => {
@@ -521,8 +657,9 @@ describe('useConversion conversion', () => {
           status: 'completed',
           operation_id: operationId,
           amount: '1.25',
-          code: 'CODE-123',
-          created_at: '2026-07-13T00:00:00.000Z',
+          count: 1,
+          total_amount: '1.25',
+          codes: [{ code: 'CODE-123', created_at: '2026-07-13T00:00:00.000Z' }],
         }
       }),
     })
@@ -535,7 +672,9 @@ describe('useConversion conversion', () => {
       `prepare:${operationId}:1.25`,
       'execute:operation-secret',
     ])
-    expect(conversion.result.value).toMatchObject({ status: 'completed', code: 'CODE-123' })
+    expect(conversion.result.value).toMatchObject({
+      status: 'completed', codes: [{ code: 'CODE-123' }],
+    })
     expect(conversion.pending.value).toBeNull()
   })
 
@@ -552,7 +691,9 @@ describe('useConversion conversion', () => {
 
     expect(me).toHaveBeenCalledTimes(1)
     expect(conversion.profile.value).toEqual({ ...profile, balance: '11.25' })
-    expect(conversion.result.value).toMatchObject({ status: 'completed', code: 'CODE-123' })
+    expect(conversion.result.value).toMatchObject({
+      status: 'completed', codes: [{ code: 'CODE-123' }],
+    })
     expect(conversion.pendingOperation.value).toBeNull()
   })
 
@@ -570,7 +711,9 @@ describe('useConversion conversion', () => {
     await conversion.convert('1.25')
 
     expect(me).toHaveBeenCalledTimes(1)
-    expect(conversion.result.value).toMatchObject({ status: 'completed', code: 'CODE-123' })
+    expect(conversion.result.value).toMatchObject({
+      status: 'completed', codes: [{ code: 'CODE-123' }],
+    })
     expect(conversion.pendingOperation.value).toBeNull()
     expect(conversion.error.value).toMatchObject({
       code: 'UPSTREAM_UNAVAILABLE',
@@ -602,13 +745,17 @@ describe('useConversion conversion', () => {
     const client = api({
       prepare: vi.fn().mockImplementation(async () => {
         calls.push('prepare')
-        return { operation_token: 'operation-secret', expires_at: '2099-07-13T01:00:00.000Z', amount: '1.25' }
+        return {
+          operation_token: 'operation-secret', expires_at: expiresAt,
+          amount: '1.25', count: 1, total_amount: '1.25',
+        }
       }),
       execute: vi.fn().mockImplementation(async () => {
         calls.push('execute')
         return {
-          status: 'completed', operation_id: operationId, amount: '1.25',
-          code: 'CODE-123', created_at: '2026-07-13T00:00:00.000Z',
+          status: 'completed', operation_id: operationId, amount: '1.25', count: 1,
+          total_amount: '1.25',
+          codes: [{ code: 'CODE-123', created_at: '2026-07-13T00:00:00.000Z' }],
         }
       }),
     })
@@ -648,7 +795,8 @@ describe('useConversion conversion', () => {
       .mockReturnValueOnce(true)
       .mockReturnValueOnce(false)
     const prepare = vi.fn().mockResolvedValue({
-      operation_token: 'operation-secret', expires_at: '2099-07-13T01:00:00.000Z', amount: '1',
+      operation_token: 'operation-secret', expires_at: expiresAt,
+      amount: '1', count: 1, total_amount: '1',
     })
     const conversion = createUseConversion(api({ prepare, execute }), storage({ savePending }))
 
@@ -673,6 +821,8 @@ describe('useConversion conversion', () => {
           operation_token: 'corrected-secret',
           expires_at: '2099-07-13T01:00:00.000Z',
           amount: '2',
+          count: 1,
+          total_amount: '2',
         })
       const execute = vi.fn().mockResolvedValue({
         status: 'pending', operation_id: correctedOperationId, error: 'CONVERSION_PENDING',
@@ -689,7 +839,9 @@ describe('useConversion conversion', () => {
       await conversion.convert('2')
 
       expect(randomUUID).toHaveBeenCalledTimes(2)
-      expect(prepare).toHaveBeenLastCalledWith({ operation_id: correctedOperationId, amount: '2' })
+      expect(prepare).toHaveBeenLastCalledWith({
+        operation_id: correctedOperationId, amount: '2', count: 1,
+      })
       expect(execute).toHaveBeenCalledWith({ operation_token: 'corrected-secret' })
     },
   )
@@ -707,7 +859,7 @@ describe('useConversion conversion', () => {
 
     expect(clearPending).toHaveBeenCalledTimes(1)
     expect(conversion.pendingOperation.value).toEqual({
-      version: 1, operation_id: operationId, amount: '1', state: 'preparing',
+      version: 2, operation_id: operationId, amount: '1', count: 1, state: 'preparing',
     })
     expect(conversion.error.value).toMatchObject({
       code: 'MANUAL_REVIEW_REQUIRED',
@@ -734,7 +886,8 @@ describe('useConversion conversion', () => {
       : vi.fn().mockRejectedValue(failure)
     const conversion = createUseConversion(api({
       prepare: vi.fn().mockResolvedValue({
-        operation_token: 'same-operation-secret', expires_at: '2099-07-13T01:00:00.000Z', amount: '1',
+        operation_token: 'same-operation-secret', expires_at: expiresAt,
+        amount: '1', count: 1, total_amount: '1',
       }),
       execute,
     }), store)
@@ -742,9 +895,10 @@ describe('useConversion conversion', () => {
     await conversion.convert('1')
 
     expect(saved.at(-1)).toEqual({
-      version: 1,
+      version: 2,
       operation_id: operationId,
       amount: '1',
+      count: 1,
       state: 'pending',
       operation_token: 'same-operation-secret',
       expires_at: '2099-07-13T01:00:00.000Z',
@@ -760,7 +914,8 @@ describe('useConversion conversion', () => {
     })
     const conversion = createUseConversion(api({
       prepare: vi.fn().mockResolvedValue({
-        operation_token: 'must-be-removed', expires_at: '2099-07-13T01:00:00.000Z', amount: '1',
+        operation_token: 'must-be-removed', expires_at: expiresAt,
+        amount: '1', count: 1, total_amount: '1',
       }),
       execute,
     }), shared.store, exclusiveCoordinator())
@@ -770,7 +925,7 @@ describe('useConversion conversion', () => {
 
     expect(execute).toHaveBeenCalledTimes(1)
     expect(shared.pending()).toEqual({
-      version: 1, operation_id: operationId, amount: '1', state: 'expired',
+      version: 2, operation_id: operationId, amount: '1', count: 1, state: 'expired',
       expires_at: '2099-07-13T01:00:00.000Z',
     })
     expect(conversion.pendingOperation.value).toEqual(shared.pending())
@@ -793,30 +948,34 @@ describe('useConversion conversion', () => {
     })
     const prepare = vi.fn()
       .mockResolvedValueOnce({
-        operation_token: 'first-secret', expires_at: '2099-07-13T01:00:00.000Z', amount: '1',
+        operation_token: 'first-secret', expires_at: expiresAt,
+        amount: '1', count: 1, total_amount: '1',
       })
       .mockResolvedValueOnce({
-        operation_token: 'second-secret', expires_at: '2099-07-13T01:00:00.000Z', amount: '2',
+        operation_token: 'second-secret', expires_at: expiresAt,
+        amount: '2', count: 1, total_amount: '2',
       })
     const execute = vi.fn()
       .mockResolvedValueOnce({
-        status: 'completed', operation_id: operationId, amount: '1', code: 'CODE-FIRST',
-        created_at: '2026-07-13T00:00:00.000Z',
+        status: 'completed', operation_id: operationId, amount: '1', count: 1,
+        total_amount: '1',
+        codes: [{ code: 'CODE-FIRST', created_at: '2026-07-13T00:00:00.000Z' }],
       })
       .mockRejectedValueOnce(new TypeError('network failed'))
     const conversion = createUseConversion(api({ prepare, execute }), store)
 
     await conversion.convert('1')
-    expect(conversion.result.value?.code).toBe('CODE-FIRST')
+    expect(conversion.result.value?.codes[0]?.code).toBe('CODE-FIRST')
 
     await conversion.convert('2')
 
     expect(conversion.result.value).toBeNull()
     expect(conversion.pending.value).toBeNull()
     expect(conversion.pendingOperation.value).toEqual({
-      version: 1,
+      version: 2,
       operation_id: secondOperationId,
       amount: '2',
+      count: 1,
       state: 'pending',
       operation_token: 'second-secret',
       expires_at: '2099-07-13T01:00:00.000Z',
@@ -838,20 +997,21 @@ describe('useConversion conversion', () => {
     const conversion = createUseConversion(api(), storage({ savePending }))
 
     await conversion.convert('1.25')
-    expect(conversion.result.value?.code).toBe('CODE-123')
+    expect(conversion.result.value?.codes[0]?.code).toBe('CODE-123')
 
     await conversion.convert('2')
 
-    expect(conversion.result.value?.code).toBe('CODE-123')
+    expect(conversion.result.value?.codes[0]?.code).toBe('CODE-123')
     expect(conversion.pendingOperation.value).toBeNull()
     expect(conversion.error.value).toMatchObject({ code: 'MANUAL_REVIEW_REQUIRED' })
   })
 
   it('loads pending recovery metadata without automatically calling prepare or execute', async () => {
     const pending: PendingOperation = {
-      version: 1,
+      version: 2,
       operation_id: operationId,
       amount: '1',
+      count: 1,
       state: 'ready',
       operation_token: 'same-operation-secret',
       expires_at: '2099-07-13T01:00:00.000Z',
@@ -870,17 +1030,17 @@ describe('useConversion conversion', () => {
   })
 
   it.each([
-    { version: 1 as const, operation_id: operationId, amount: '1', state: 'preparing' as const },
+    { version: 2 as const, operation_id: operationId, amount: '1', count: 1, state: 'preparing' as const },
     {
-      version: 1 as const, operation_id: operationId, amount: '1', state: 'ready' as const,
+      version: 2 as const, operation_id: operationId, amount: '1', count: 1, state: 'ready' as const,
       operation_token: 'operation-secret', expires_at: '2099-07-13T01:00:00.000Z',
     },
     {
-      version: 1 as const, operation_id: operationId, amount: '1', state: 'pending' as const,
+      version: 2 as const, operation_id: operationId, amount: '1', count: 1, state: 'pending' as const,
       operation_token: 'operation-secret', expires_at: '2099-07-13T01:00:00.000Z',
     },
     {
-      version: 1 as const, operation_id: operationId, amount: '1', state: 'expired' as const,
+      version: 2 as const, operation_id: operationId, amount: '1', count: 1, state: 'expired' as const,
       expires_at: '2020-07-13T01:00:00.000Z',
     },
   ])('does not overwrite an unresolved $state operation with a new conversion', async (existing) => {
@@ -903,10 +1063,11 @@ describe('useConversion conversion', () => {
   it('resumes preparing with the same operation ID and ready with the same operation token', async () => {
     const randomUUID = vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(operationId)
     const preparing: PendingOperation = {
-      version: 1, operation_id: operationId, amount: '1', state: 'preparing',
+      version: 2, operation_id: operationId, amount: '1', count: 1, state: 'preparing',
     }
     const prepare = vi.fn().mockResolvedValue({
-      operation_token: 'same-operation-secret', expires_at: '2099-07-13T01:00:00.000Z', amount: '1',
+      operation_token: 'same-operation-secret', expires_at: expiresAt,
+      amount: '1', count: 1, total_amount: '1',
     })
     const execute = vi.fn().mockResolvedValue({ status: 'pending', operation_id: operationId, error: 'CONVERSION_PENDING' })
     const store = storage({ loadPending: vi.fn().mockReturnValue(preparing) })
@@ -915,7 +1076,7 @@ describe('useConversion conversion', () => {
 
     await conversion.resumePending()
 
-    expect(prepare).toHaveBeenCalledWith({ operation_id: operationId, amount: '1' })
+    expect(prepare).toHaveBeenCalledWith({ operation_id: operationId, amount: '1', count: 1 })
     expect(execute).toHaveBeenCalledWith({ operation_token: 'same-operation-secret' })
     expect(randomUUID).not.toHaveBeenCalled()
   })
@@ -923,9 +1084,10 @@ describe('useConversion conversion', () => {
   it('resumes ready directly with the stored token without preparing a new operation', async () => {
     const randomUUID = vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(operationId)
     const ready: PendingOperation = {
-      version: 1,
+      version: 2,
       operation_id: operationId,
       amount: '1',
+      count: 1,
       state: 'ready',
       operation_token: 'stored-operation-secret',
       expires_at: '2099-07-13T01:00:00.000Z',
@@ -950,9 +1112,10 @@ describe('useConversion conversion', () => {
 
   it('converts an expired token to minimal manual-review metadata and never executes it', async () => {
     const ready: PendingOperation = {
-      version: 1,
+      version: 2,
       operation_id: operationId,
       amount: '1',
+      count: 1,
       state: 'ready',
       operation_token: 'expired-operation-secret',
       expires_at: '2020-07-13T01:00:00.000Z',
@@ -968,9 +1131,10 @@ describe('useConversion conversion', () => {
     await conversion.resumePending()
 
     expect(conversion.pendingOperation.value).toEqual({
-      version: 1,
+      version: 2,
       operation_id: operationId,
       amount: '1',
+      count: 1,
       state: 'expired',
       expires_at: '2020-07-13T01:00:00.000Z',
     })
@@ -980,9 +1144,10 @@ describe('useConversion conversion', () => {
 
   it('keeps expired manual-review state in memory when expiry downgrade persistence fails', async () => {
     const ready: PendingOperation = {
-      version: 1,
+      version: 2,
       operation_id: operationId,
       amount: '1',
+      count: 1,
       state: 'ready',
       operation_token: 'expired-operation-secret',
       expires_at: '2020-07-13T01:00:00.000Z',
@@ -1003,9 +1168,10 @@ describe('useConversion conversion', () => {
     await conversion.initialize()
 
     expect(conversion.pendingOperation.value).toEqual({
-      version: 1,
+      version: 2,
       operation_id: operationId,
       amount: '1',
+      count: 1,
       state: 'expired',
       expires_at: '2020-07-13T01:00:00.000Z',
     })
@@ -1023,9 +1189,10 @@ describe('useConversion conversion', () => {
 
   it('clears a terminated operation and never executes it again on resume', async () => {
     const ready: PendingOperation = {
-      version: 1,
+      version: 2,
       operation_id: operationId,
       amount: '1',
+      count: 1,
       state: 'ready',
       operation_token: 'terminated-secret',
       expires_at: '2099-07-13T01:00:00.000Z',
@@ -1056,9 +1223,10 @@ describe('useConversion conversion', () => {
     'MANUAL_REVIEW_REQUIRED',
   ] as const)('converts non-retryable execute error %s to tokenless manual review', async (code) => {
     const ready: PendingOperation = {
-      version: 1,
+      version: 2,
       operation_id: operationId,
       amount: '1',
+      count: 1,
       state: 'ready',
       operation_token: 'unsafe-to-retry-secret',
       expires_at: '2099-07-13T01:00:00.000Z',
@@ -1079,9 +1247,10 @@ describe('useConversion conversion', () => {
 
     expect(execute).toHaveBeenCalledTimes(1)
     expect(saved.at(-1)).toEqual({
-      version: 1,
+      version: 2,
       operation_id: operationId,
       amount: '1',
+      count: 1,
       state: 'expired',
       expires_at: '2099-07-13T01:00:00.000Z',
     })
@@ -1092,9 +1261,10 @@ describe('useConversion conversion', () => {
 
   it('keeps terminated manual-review state in memory when clearing storage fails', async () => {
     const ready: PendingOperation = {
-      version: 1,
+      version: 2,
       operation_id: operationId,
       amount: '1',
+      count: 1,
       state: 'ready',
       operation_token: 'terminated-secret',
       expires_at: '2099-07-13T01:00:00.000Z',
@@ -1116,9 +1286,10 @@ describe('useConversion conversion', () => {
     expect(execute).toHaveBeenCalledTimes(1)
     expect(randomUUID).not.toHaveBeenCalled()
     expect(conversion.pendingOperation.value).toEqual({
-      version: 1,
+      version: 2,
       operation_id: operationId,
       amount: '1',
+      count: 1,
       state: 'expired',
       expires_at: '2099-07-13T01:00:00.000Z',
     })
@@ -1130,9 +1301,10 @@ describe('useConversion conversion', () => {
 
   it('keeps tokenless manual-review state and storage error priority when downgrade save fails', async () => {
     const ready: PendingOperation = {
-      version: 1,
+      version: 2,
       operation_id: operationId,
       amount: '1',
+      count: 1,
       state: 'ready',
       operation_token: 'invalid-secret',
       expires_at: '2099-07-13T01:00:00.000Z',
@@ -1151,9 +1323,10 @@ describe('useConversion conversion', () => {
 
     expect(execute).toHaveBeenCalledTimes(1)
     expect(conversion.pendingOperation.value).toEqual({
-      version: 1,
+      version: 2,
       operation_id: operationId,
       amount: '1',
+      count: 1,
       state: 'expired',
       expires_at: '2099-07-13T01:00:00.000Z',
     })
@@ -1165,9 +1338,10 @@ describe('useConversion conversion', () => {
 
   it('does not revive a manual-review token when downgrade save and clear both fail', async () => {
     const ready: PendingOperation = {
-      version: 1,
+      version: 2,
       operation_id: operationId,
       amount: '1',
+      count: 1,
       state: 'ready',
       operation_token: 'must-not-revive',
       expires_at: '2099-07-13T01:00:00.000Z',
@@ -1220,11 +1394,13 @@ describe('useConversion conversion', () => {
     const clearPending = vi.fn()
     const conversion = createUseConversion(api({
       prepare: vi.fn().mockResolvedValue({
-        operation_token: 'operation-secret', expires_at: '2099-07-13T01:00:00.000Z', amount: '1',
+        operation_token: 'operation-secret', expires_at: expiresAt,
+        amount: '1', count: 1, total_amount: '1',
       }),
       execute: vi.fn().mockResolvedValue({
-        status: 'completed', operation_id: operationId, amount: '1', code: 'CODE-123',
-        created_at: '2026-07-13T00:00:00.000Z',
+        status: 'completed', operation_id: operationId, amount: '1', count: 1,
+        total_amount: '1',
+        codes: [{ code: 'CODE-123', created_at: '2026-07-13T00:00:00.000Z' }],
       }),
     }), storage({
       saveHistory: vi.fn().mockReturnValue(false),
@@ -1243,11 +1419,13 @@ describe('useConversion conversion', () => {
     const clearPending = vi.fn()
     const conversion = createUseConversion(api({
       prepare: vi.fn().mockResolvedValue({
-        operation_token: 'operation-secret', expires_at: '2099-07-13T01:00:00.000Z', amount: '1',
+        operation_token: 'operation-secret', expires_at: expiresAt,
+        amount: '1', count: 1, total_amount: '1',
       }),
       execute: vi.fn().mockResolvedValue({
-        status: 'completed', operation_id: operationId, amount: '1', code: 'CODE-123',
-        created_at: 'upstream-time-value',
+        status: 'completed', operation_id: operationId, amount: '1', count: 1,
+        total_amount: '1',
+        codes: [{ code: 'CODE-123', created_at: 'upstream-time-value' }],
       }),
     }), storage({
       loadHistory: vi.fn().mockImplementation(() => { throw new Error('storage blocked') }),
@@ -1269,19 +1447,27 @@ describe('useConversion conversion', () => {
     vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(operationId)
     const conversion = createUseConversion(api({
       prepare: vi.fn().mockResolvedValue({
-        operation_token: 'operation-secret', expires_at: '2099-07-13T01:00:00.000Z', amount: '1',
+        operation_token: 'operation-secret', expires_at: expiresAt,
+        amount: '1', count: 1, total_amount: '1',
       }),
       execute: vi.fn().mockResolvedValue({
-        status: 'completed', operation_id: operationId, amount: '1', code: 'CODE-UPSTREAM',
-        created_at: 'upstream-time-value',
+        status: 'completed', operation_id: operationId, amount: '1', count: 1,
+        total_amount: '1',
+        codes: [{ code: 'CODE-UPSTREAM', created_at: 'upstream-time-value' }],
       }),
     }), browserStorage, exclusiveCoordinator())
 
     await conversion.convert('1')
 
-    expect(conversion.result.value?.code).toBe('CODE-UPSTREAM')
+    expect(conversion.result.value?.codes[0]?.code).toBe('CODE-UPSTREAM')
     expect(loadHistory()).toEqual([{
-      version: 1, operation_id: operationId, amount: '1', code: 'CODE-UPSTREAM',
+      version: 2,
+      history_id: `${operationId}:1`,
+      operation_id: operationId,
+      batch_index: 1,
+      batch_size: 1,
+      amount: '1',
+      code: 'CODE-UPSTREAM',
       created_at: 'upstream-time-value',
     }])
     expect(conversion.pendingOperation.value).toBeNull()
@@ -1294,6 +1480,8 @@ describe('useConversion conversion', () => {
         operation_token: 'operation-secret',
         expires_at: '2099-07-13T01:00:00.000Z',
         amount: '2.0',
+        count: 1,
+        total_amount: '2',
       }),
       execute: vi.fn().mockResolvedValue({
         status: 'pending',
@@ -1332,9 +1520,10 @@ describe('useConversion conversion', () => {
 
     expect(conversion.pending.value).toBeNull()
     expect(conversion.pendingOperation.value).toEqual({
-      version: 1,
+      version: 2,
       operation_id: operationId,
       amount: '1',
+      count: 1,
       state: 'preparing',
     })
     expect(conversion.error.value).toMatchObject({
@@ -1352,6 +1541,8 @@ describe('useConversion conversion', () => {
         operation_token: 'operation-secret',
         expires_at: '2099-07-13T01:00:00.000Z',
         amount: '2',
+        count: 1,
+        total_amount: '2',
       }),
       execute,
     })
@@ -1372,8 +1563,9 @@ describe('useConversion conversion', () => {
         status: 'completed' as const,
         operation_id: 'different-operation',
         amount: '1',
-        code: 'MUST-NOT-DISPLAY',
-        created_at: '2026-07-13T00:00:00.000Z',
+        count: 1,
+        total_amount: '1',
+        codes: [{ code: 'MUST-NOT-DISPLAY', created_at: '2026-07-13T00:00:00.000Z' }],
       },
     ],
     [
@@ -1382,8 +1574,9 @@ describe('useConversion conversion', () => {
         status: 'completed' as const,
         operation_id: operationId,
         amount: '2',
-        code: 'MUST-NOT-DISPLAY',
-        created_at: '2026-07-13T00:00:00.000Z',
+        count: 1,
+        total_amount: '2',
+        codes: [{ code: 'MUST-NOT-DISPLAY', created_at: '2026-07-13T00:00:00.000Z' }],
       },
     ],
     [
@@ -1401,6 +1594,8 @@ describe('useConversion conversion', () => {
         operation_token: 'operation-secret',
         expires_at: '2099-07-13T01:00:00.000Z',
         amount: '1.0',
+        count: 1,
+        total_amount: '1',
       }),
       execute: vi.fn().mockResolvedValue(response),
     })
@@ -1431,6 +1626,8 @@ describe('API client', () => {
         operation_token: 'operation-secret',
         expires_at: '2099-07-13T01:00:00.000Z',
         amount: '1',
+        count: 1,
+        total_amount: '1',
       }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({
         status: 'pending', operation_id: operationId, error: 'CONVERSION_PENDING',
@@ -1440,7 +1637,7 @@ describe('API client', () => {
     await client.exchange('jwt-secret')
     await client.me()
     await client.logout()
-    await client.prepare({ operation_id: operationId, amount: '1' })
+    await client.prepare({ operation_id: operationId, amount: '1', count: 1 })
     await client.execute({ operation_token: 'operation-secret' })
 
     expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
@@ -1499,7 +1696,7 @@ describe('API client', () => {
     [
       'prepare 204',
       new Response(null, { status: 204 }),
-      (client: ConversionApi) => client.prepare({ operation_id: operationId, amount: '1' }),
+      (client: ConversionApi) => client.prepare({ operation_id: operationId, amount: '1', count: 1 }),
     ],
     [
       'completed execution without code',
@@ -1547,8 +1744,9 @@ describe('API client', () => {
       status: 'completed' as const,
       operation_id: operationId,
       amount: '1',
-      code: 'CODE-123',
-      created_at: '2026-07-13 00:00:00',
+      count: 1,
+      total_amount: '1',
+      codes: [{ code: 'CODE-123', created_at: '2026-07-13 00:00:00' }],
     }
     const client = createApiClient(vi.fn().mockResolvedValue(
       new Response(JSON.stringify(completed), { status: 200 }),

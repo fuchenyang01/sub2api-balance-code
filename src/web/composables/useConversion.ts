@@ -5,6 +5,7 @@ import type { ErrorCode, ExecuteResponse, MeResponse } from '../../shared/contra
 import type { ExecutableOperation, HistoryItem, PendingOperation } from '../../shared/storage-types.js'
 import { ApiClientError, apiClient, type ConversionApi } from '../api.js'
 import { browserCoordinator, type ConversionCoordinator } from '../coordinator.js'
+import { calculateTotalAmount, normalizeCount } from '../conversion-input.js'
 import { browserStorage, type ConversionStorage } from '../storage.js'
 
 type CompletedResult = Extract<ExecuteResponse, { status: 'completed' }>
@@ -32,7 +33,7 @@ export interface ConversionController {
   initialize(): Promise<void>
   refresh(): Promise<void>
   logout(): Promise<void>
-  convert(amount: string): Promise<void>
+  convert(amount: string, count?: number): Promise<void>
   resumePending(): Promise<void>
   clearHistory(): void
 }
@@ -132,6 +133,10 @@ function amountsEqual(left: string, right: string): boolean {
   }
 }
 
+function storedCount(operation: PendingOperation): number {
+  return operation.count ?? 1
+}
+
 function conversionConflict(): ApiClientError {
   return new ApiClientError('UPSTREAM_DATA_CONFLICT', 502, '')
 }
@@ -229,9 +234,10 @@ export function createUseConversion(
 
   function toManualReview(value: ExecutableOperation): PendingOperation {
     return {
-      version: 1,
+      version: 2,
       operation_id: value.operation_id,
       amount: value.amount,
+      count: storedCount(value),
       state: 'expired',
       expires_at: value.expires_at,
     }
@@ -397,13 +403,16 @@ export function createUseConversion(
   }
 
   function publishHistory(response: CompletedResult): boolean {
-    const item: HistoryItem = {
-      version: 1,
+    const items = response.codes.map((entry, index): HistoryItem => ({
+      version: 2,
+      history_id: `${response.operation_id}:${index + 1}`,
       operation_id: response.operation_id,
+      batch_index: index + 1,
+      batch_size: response.count,
       amount: response.amount,
-      code: response.code,
-      created_at: response.created_at,
-    }
+      code: entry.code,
+      created_at: entry.created_at,
+    }))
     let currentHistory: HistoryItem[]
     try {
       currentHistory = storage.loadHistory()
@@ -413,14 +422,15 @@ export function createUseConversion(
       return false
     }
     const chronological = [...currentHistory].reverse()
-    chronological.push(item)
+    chronological.push(...items)
     if (!storage.saveHistory(chronological)) {
       failStorage()
       return false
     }
+    const newIds = new Set(items.map(({ history_id }) => history_id))
     conversionHistory.value = [
-      item,
-      ...currentHistory.filter((entry) => entry.operation_id !== item.operation_id),
+      ...items.reverse(),
+      ...currentHistory.filter((entry) => !newIds.has(entry.history_id)),
     ].slice(0, 100)
     return true
   }
@@ -435,6 +445,11 @@ export function createUseConversion(
       if (response.operation_id !== operation.operation_id) throw conversionConflict()
       if (response.status === 'completed') {
         if (!amountsEqual(response.amount, operation.amount)) throw conversionConflict()
+        const count = storedCount(operation)
+        if (response.count !== count) throw conversionConflict()
+        if (!amountsEqual(response.total_amount, calculateTotalAmount(operation.amount, count))) {
+          throw conversionConflict()
+        }
         if (!publishHistory(response)) return
         if (!clearCompletedPending(operation.operation_id)) return
         result.value = response
@@ -480,12 +495,19 @@ export function createUseConversion(
       const prepared = await api.prepare({
         operation_id: operation.operation_id,
         amount: operation.amount,
+        count: storedCount(operation),
       })
       if (!amountsEqual(prepared.amount, operation.amount)) throw conversionConflict()
+      const count = storedCount(operation)
+      if (prepared.count !== count) throw conversionConflict()
+      if (!amountsEqual(prepared.total_amount, calculateTotalAmount(operation.amount, count))) {
+        throw conversionConflict()
+      }
       const ready: ExecutableOperation = {
-        version: 1,
+        version: 2,
         operation_id: operation.operation_id,
         amount: operation.amount,
+        count,
         state: 'ready',
         operation_token: prepared.operation_token,
         expires_at: prepared.expires_at,
@@ -501,7 +523,7 @@ export function createUseConversion(
     }
   }
 
-  async function convert(rawAmount: string): Promise<void> {
+  async function convert(rawAmount: string, rawCount = 1): Promise<void> {
     if (busy.value || safetyFailureActive || pendingOperation.value?.state === 'expired') return
     busy.value = true
     error.value = null
@@ -518,11 +540,13 @@ export function createUseConversion(
           return
         }
         const amount = normalizeAmount(rawAmount)
+        const count = normalizeCount(String(rawCount))
         const operationId = crypto.randomUUID()
         const operation: PendingOperation = {
-          version: 1,
+          version: 2,
           operation_id: operationId,
           amount,
+          count,
           state: 'preparing',
         }
         if (!persistPending(operation)) return
