@@ -99,8 +99,13 @@ describe('sub2api clients', () => {
     })
   })
 
-  it('generates exactly one balance code with isolated admin headers', async () => {
-    const operationId = 'op-generate'
+  it('generates one batch with one upstream request and isolated admin headers', async () => {
+    const operationId = 'op-batch'
+    const generated = [
+      redeemCode,
+      { ...redeemCode, id: 12, code: 'ABC-124' },
+      { ...redeemCode, id: 13, code: 'ABC-125' },
+    ]
     handler = async (request, response) => {
       expect(request.method).toBe('POST')
       expect(request.url).toBe('/api/v1/admin/redeem-codes/generate')
@@ -108,26 +113,27 @@ describe('sub2api clients', () => {
       expect(request.headers.authorization).toBeUndefined()
       expect(request.headers['content-type']).toBe('application/json')
       expect(request.headers['idempotency-key']).toBe(`code-${operationId}`)
-      expect(await readJson(request)).toEqual({ count: 1, type: 'balance', value: 12.5 })
-      json(response, 200, { code: 0, message: 'success', data: [redeemCode] })
+      expect(await readJson(request)).toEqual({ count: 3, type: 'balance', value: 12.5 })
+      json(response, 200, { code: 0, message: 'success', data: generated })
     }
 
     const client = new Sub2ApiAdminClient(baseUrl, 'admin-secret', 1_000)
 
-    await expect(client.generateCode(operationId, 12.5)).resolves.toEqual(parsedRedeemCode)
+    await expect(client.generateCodes(operationId, 12.5, 3)).resolves.toHaveLength(3)
   })
 
-  it.each([{ data: [] }, { data: [redeemCode, { ...redeemCode, id: 12 }] }])(
-    'rejects a generated-code array whose length is not one',
-    async ({ data }) => {
-      handler = (_request, response) => json(response, 200, { code: 0, message: 'success', data })
-      const client = new Sub2ApiAdminClient(baseUrl, 'admin-secret', 1_000)
+  it('rejects a response whose length differs from the requested count', async () => {
+    handler = (_request, response) => json(response, 200, {
+      code: 0,
+      message: 'success',
+      data: [redeemCode],
+    })
+    const client = new Sub2ApiAdminClient(baseUrl, 'admin-secret', 1_000)
 
-      await expect(client.generateCode('op', 1)).rejects.toSatisfy((error: unknown) =>
-        isUpstreamError(error, 'invalid-response'),
-      )
-    },
-  )
+    await expect(client.generateCodes('op-batch', 12.5, 3)).rejects.toSatisfy(
+      (error: unknown) => isUpstreamError(error, 'invalid-response'),
+    )
+  })
 
   it('treats an idempotency replay as the same successful generation', async () => {
     handler = (_request, response) => {
@@ -136,7 +142,7 @@ describe('sub2api clients', () => {
     }
     const client = new Sub2ApiAdminClient(baseUrl, 'admin-secret', 1_000)
 
-    await expect(client.generateCode('replayed-op', 12.5)).resolves.toEqual(parsedRedeemCode)
+    await expect(client.generateCodes('replayed-op', 12.5, 1)).resolves.toEqual([parsedRedeemCode])
   })
 
   it('gets an existing code and maps a 404 to null', async () => {
@@ -186,6 +192,18 @@ describe('sub2api clients', () => {
     const client = new Sub2ApiAdminClient(baseUrl, 'admin-secret', 1_000)
 
     await expect(client.deleteCode(99)).resolves.toBe('missing')
+  })
+
+  it('batch deletes exact code IDs in one request', async () => {
+    handler = async (request, response) => {
+      expect(request.method).toBe('POST')
+      expect(request.url).toBe('/api/v1/admin/redeem-codes/batch-delete')
+      expect(await readJson(request)).toEqual({ ids: [11, 12, 13] })
+      json(response, 200, { code: 0, message: 'success', data: { deleted: 3 } })
+    }
+    const client = new Sub2ApiAdminClient(baseUrl, 'admin-secret', 1_000)
+
+    await expect(client.batchDeleteCodes([11, 12, 13])).resolves.toBe(3)
   })
 
   it('debits balance with exact body and derived idempotency key', async () => {
@@ -250,7 +268,7 @@ describe('sub2api clients', () => {
       json(response, 503, { code: 1, message: 'idempotency failure', reason })
     const client = new Sub2ApiAdminClient(baseUrl, 'admin-secret', 1_000)
 
-    await expect(client.generateCode('op', 1)).rejects.toSatisfy((error: unknown) =>
+    await expect(client.generateCodes('op', 1, 1)).rejects.toSatisfy((error: unknown) =>
       isUpstreamError(error, kind),
     )
   })
@@ -396,7 +414,7 @@ describe('sub2api clients', () => {
       }
       const client = new Sub2ApiAdminClient(baseUrl, 'admin-secret', 1_000)
 
-      await expect(client.generateCode('op', 1)).rejects.toBeInstanceOf(UpstreamError)
+      await expect(client.generateCodes('op', 1, 1)).rejects.toBeInstanceOf(UpstreamError)
       expect(targetRequests).toBe(0)
       expect(targetHeaders).toBeUndefined()
     } finally {
@@ -441,7 +459,7 @@ describe('sub2api clients', () => {
       })
     const client = new Sub2ApiAdminClient(baseUrl, adminKey, 1_000)
 
-    const error = await client.generateCode('op', 1).catch((caught: unknown) => caught)
+    const error = await client.generateCodes('op', 1, 1).catch((caught: unknown) => caught)
 
     expect(error).toBeInstanceOf(UpstreamError)
     expect((error as UpstreamError).message.length).toBeLessThanOrEqual(1_024)
@@ -454,7 +472,7 @@ describe('sub2api clients', () => {
     ['user-jwt', () => new Sub2ApiUserClient(baseUrl, 1_000).getProfile('user-jwt')],
     [
       'admin-secret',
-      () => new Sub2ApiAdminClient(baseUrl, 'admin-secret', 1_000).generateCode('op', 1),
+      () => new Sub2ApiAdminClient(baseUrl, 'admin-secret', 1_000).generateCodes('op', 1, 1),
     ],
   ] as const)('does not expose the %s credential in an error', async (secret, request) => {
     handler = (_incoming, response) =>
