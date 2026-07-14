@@ -16,6 +16,7 @@ test.describe('desktop conversion', () => {
     await expect(page.getByText('测试用户')).toBeVisible()
 
     await completeConversion(page)
+    await expect(page.getByLabel('当前余额')).toContainText('90')
     await page.getByRole('button', { name: '复制兑换码', exact: true }).first().click()
     await expect(page.getByText('已复制', { exact: true })).toBeVisible()
     await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('TEST-CODE-1')

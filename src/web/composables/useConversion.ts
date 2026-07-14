@@ -327,6 +327,14 @@ export function createUseConversion(
     if (!safetyFailureActive) error.value = safeError
   }
 
+  async function refreshProfileAfterCompletion(): Promise<void> {
+    try {
+      await loadProfile()
+    } catch (caught) {
+      handleError(caught)
+    }
+  }
+
   function initialize(): Promise<void> {
     if (initialization !== null) return initialization
     initialization = (async () => {
@@ -431,6 +439,7 @@ export function createUseConversion(
         if (!clearCompletedPending(operation.operation_id)) return
         result.value = response
         pending.value = null
+        await refreshProfileAfterCompletion()
       } else {
         if (response.error === 'MANUAL_REVIEW_REQUIRED') {
           expirePending(operation)

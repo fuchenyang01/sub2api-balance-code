@@ -539,6 +539,45 @@ describe('useConversion conversion', () => {
     expect(conversion.pending.value).toBeNull()
   })
 
+  it('reloads the live profile after a completed conversion', async () => {
+    vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(operationId)
+    const me = vi.fn().mockResolvedValue({ ...profile, balance: '11.25' })
+    const conversion = createUseConversion(
+      api({ me }),
+      storage(),
+      exclusiveCoordinator(),
+    )
+
+    await conversion.convert('1.25')
+
+    expect(me).toHaveBeenCalledTimes(1)
+    expect(conversion.profile.value).toEqual({ ...profile, balance: '11.25' })
+    expect(conversion.result.value).toMatchObject({ status: 'completed', code: 'CODE-123' })
+    expect(conversion.pendingOperation.value).toBeNull()
+  })
+
+  it('keeps a completed result terminal when the balance refresh fails', async () => {
+    vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(operationId)
+    const me = vi.fn().mockRejectedValue(
+      new ApiClientError('UPSTREAM_UNAVAILABLE', 503, 'profile-refresh'),
+    )
+    const conversion = createUseConversion(
+      api({ me }),
+      storage(),
+      exclusiveCoordinator(),
+    )
+
+    await conversion.convert('1.25')
+
+    expect(me).toHaveBeenCalledTimes(1)
+    expect(conversion.result.value).toMatchObject({ status: 'completed', code: 'CODE-123' })
+    expect(conversion.pendingOperation.value).toBeNull()
+    expect(conversion.error.value).toMatchObject({
+      code: 'UPSTREAM_UNAVAILABLE',
+      requestId: 'profile-refresh',
+    })
+  })
+
   it('persists preparing and ready before writes, then history before clearing pending', async () => {
     const calls: string[] = []
     vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(operationId)
