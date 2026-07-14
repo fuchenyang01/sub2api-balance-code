@@ -42,7 +42,7 @@ export async function openConfirmation(page: Page, amount = '10'): Promise<void>
   await expectVisibleBox(amountInput)
   await expectVisibleBox(fillButton)
   await expectNoOverlap(amountInput, fillButton)
-  await expectNoOverlap(page.locator('.amount-row'), generateButton)
+  await expectNoOverlap(page.locator('.conversion-summary'), generateButton)
   await amountInput.fill(amount)
   await generateButton.click()
   await expectVisibleBox(page.getByRole('dialog', { name: '确认兑换' }))
@@ -53,9 +53,9 @@ export async function completeConversion(page: Page): Promise<void> {
   await openConfirmation(page)
   await page.getByTestId('confirm-conversion').click()
   await expect(page.getByText('生成完成')).toBeVisible()
-  await expect(page.locator('.code-row code')).toHaveText('TEST-CODE-1')
+  await expect(page.locator('.result-code-list .code-row code')).toHaveText('TEST-CODE-1')
   await expect(page.locator('.history-section')).toContainText('TEST-CODE-1')
-  await expectNoOverlap(page.locator('.code-row'), page.locator('.history-section'))
+  await expectNoOverlap(page.locator('.result-code-list'), page.locator('.history-section'))
 }
 
 export function expectNoBrowserErrors(errors: BrowserErrors): void {

@@ -13,7 +13,7 @@ test('keeps confirmation, result, and history readable without horizontal overfl
   await openConfirmation(page)
   await expectVisibleBox(page.locator('.dialog-surface'))
   await page.getByTestId('confirm-conversion').click()
-  await expect(page.locator('.code-row code')).toHaveText('TEST-CODE-1')
+  await expect(page.locator('.result-code-list .code-row code')).toHaveText('TEST-CODE-1')
   await expectVisibleBox(page.locator('.history-mobile-list'))
   await expectNoOverlap(page.locator('.result-panel'), page.locator('.history-section'))
 
