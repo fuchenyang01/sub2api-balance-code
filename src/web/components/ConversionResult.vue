@@ -13,18 +13,23 @@ const props = defineProps<{
   pending: PendingResult | null
 }>()
 
-const copyState = ref<'idle' | 'success' | 'error'>('idle')
+const copyStatus = ref('')
 
 watch(
   () => props.result?.operation_id,
   () => {
-    copyState.value = 'idle'
+    copyStatus.value = ''
   },
 )
 
-async function copyCode(): Promise<void> {
+async function copyCode(code: string): Promise<void> {
+  copyStatus.value = await copyText(code) ? '已复制' : '复制失败，请手动复制'
+}
+
+async function copyAll(): Promise<void> {
   if (props.result === null) return
-  copyState.value = await copyText(props.result.code) ? 'success' : 'error'
+  const text = props.result.codes.map((entry) => entry.code).join('\n')
+  copyStatus.value = await copyText(text) ? '已复制全部' : '复制失败，请手动复制'
 }
 
 function displayTime(value: string): string {
@@ -48,25 +53,39 @@ function displayTime(value: string): string {
           <CheckCircle2 :size="19" aria-hidden="true" />
           <strong>生成完成</strong>
         </div>
-        <div class="code-row">
-          <code>{{ result.code }}</code>
+        <div class="result-actions">
+          <span>共 {{ result.count }} 个</span>
           <button
             type="button"
-            class="icon-button"
-            aria-label="复制兑换码"
-            title="复制兑换码"
-            @click="copyCode"
+            class="secondary-button"
+            data-testid="copy-result-all"
+            @click="copyAll"
           >
-            <Copy :size="18" aria-hidden="true" />
+            <Copy :size="17" aria-hidden="true" />
+            复制全部
           </button>
         </div>
+        <ul class="result-code-list">
+          <li v-for="entry in result.codes" :key="entry.code" class="code-row">
+            <code>{{ entry.code }}</code>
+            <button
+              type="button"
+              class="icon-button"
+              :aria-label="`复制兑换码 ${entry.code}`"
+              title="复制兑换码"
+              @click="copyCode(entry.code)"
+            >
+              <Copy :size="18" aria-hidden="true" />
+            </button>
+          </li>
+        </ul>
         <p class="copy-status" role="status" aria-live="polite">
-          <span v-if="copyState === 'success'">已复制</span>
-          <span v-else-if="copyState === 'error'">复制失败，请手动复制</span>
+          {{ copyStatus }}
         </p>
         <dl class="result-meta">
-          <div><dt>面值</dt><dd>{{ result.amount }}</dd></div>
-          <div><dt>生成时间</dt><dd>{{ displayTime(result.created_at) }}</dd></div>
+          <div><dt>单码面值</dt><dd>{{ result.amount }}</dd></div>
+          <div><dt>总扣款</dt><dd>{{ result.total_amount }}</dd></div>
+          <div v-if="result.codes[0]"><dt>生成时间</dt><dd>{{ displayTime(result.codes[0].created_at) }}</dd></div>
         </dl>
       </template>
 

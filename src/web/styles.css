@@ -254,10 +254,32 @@ label {
   font-weight: 650;
 }
 
-.amount-row {
+.conversion-fields {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) minmax(92px, 120px);
+  gap: 12px;
+}
+
+.field-group {
+  min-width: 0;
+}
+
+.conversion-summary {
+  min-height: 42px;
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.total-preview {
+  min-width: 0;
+  margin: 0;
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 700;
+  text-align: right;
 }
 
 input {
@@ -348,7 +370,6 @@ input[aria-invalid="true"] {
 
 .code-row {
   min-height: 62px;
-  margin: 16px 0 0;
   padding: 10px 10px 10px 14px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -357,6 +378,27 @@ input[aria-invalid="true"] {
   background: var(--surface-muted);
   border: 1px solid var(--border);
   border-radius: 6px;
+}
+
+.result-actions {
+  min-height: 42px;
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.result-code-list {
+  max-height: 340px;
+  margin: 10px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+  overflow-y: auto;
+  list-style: none;
 }
 
 .code-row code {
@@ -548,11 +590,12 @@ input[aria-invalid="true"] {
   font-weight: 650;
 }
 
-.history-table th:nth-child(1) { width: 25%; }
-.history-table th:nth-child(2) { width: 12%; }
-.history-table th:nth-child(3) { width: 30%; }
+.history-table th:nth-child(1) { width: 22%; }
+.history-table th:nth-child(2) { width: 8%; }
+.history-table th:nth-child(3) { width: 10%; }
 .history-table th:nth-child(4) { width: 27%; }
-.history-table th:nth-child(5) { width: 52px; }
+.history-table th:nth-child(5) { width: 27%; }
+.history-table th:nth-child(6) { width: 52px; }
 
 .history-table code,
 .history-mobile-code code {
@@ -817,8 +860,17 @@ input[aria-invalid="true"] {
     display: none;
   }
 
-  .amount-row {
+  .conversion-fields {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .conversion-summary {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .total-preview {
+    text-align: left;
   }
 
   .fill-button {

@@ -1,10 +1,14 @@
 // @vitest-environment jsdom
 
 import { mount } from '@vue/test-utils'
+import { Decimal } from 'decimal.js'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { defineComponent, nextTick, ref } from 'vue'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+import type { ExecuteResponse } from '../../src/shared/contracts.js'
+import type { HistoryItem } from '../../src/shared/storage-types.js'
 
 const styles = readFileSync(join(process.cwd(), 'src/web/styles.css'), 'utf8')
 
@@ -78,6 +82,23 @@ beforeEach(() => {
   clipboardController.copyText.mockReset()
 })
 
+function completedBatch(
+  count: number,
+  operationId = 'op-batch',
+): Extract<ExecuteResponse, { status: 'completed' }> {
+  return {
+    status: 'completed',
+    operation_id: operationId,
+    amount: '2.5',
+    count,
+    total_amount: new Decimal('2.5').mul(count).toFixed(),
+    codes: Array.from({ length: count }, (_, index) => ({
+      code: `CODE-${index + 1}`,
+      created_at: '2026-07-14T00:00:00.000Z',
+    })),
+  }
+}
+
 describe('responsive stylesheet', () => {
   it('does not force body wider than a narrow iframe viewport', () => {
     expect(styles).not.toMatch(/body\s*\{[^}]*min-width\s*:/s)
@@ -99,7 +120,7 @@ describe('ConversionForm', () => {
     'rejects invalid amount %s',
     async (amount) => {
       const wrapper = mount(ConversionForm, { props: { balance: '10', busy: false } })
-      await wrapper.get('input').setValue(amount)
+      await wrapper.get('[aria-label="兑换金额"]').setValue(amount)
 
       expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeDefined()
     },
@@ -107,11 +128,27 @@ describe('ConversionForm', () => {
 
   it('accepts a positive amount with eight decimal places', async () => {
     const wrapper = mount(ConversionForm, { props: { balance: '10', busy: false } })
-    await wrapper.get('input').setValue('9.12345678')
+    await wrapper.get('[aria-label="兑换金额"]').setValue('9.12345678')
 
     expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeUndefined()
     await wrapper.get('form').trigger('submit')
-    expect(wrapper.emitted('submit')).toEqual([['9.12345678']])
+    expect(wrapper.emitted('submit')).toEqual([[
+      { amount: '9.12345678', count: 1, totalAmount: '9.12345678' },
+    ]])
+  })
+
+  it('defaults count to one and emits a validated batch draft', async () => {
+    const wrapper = mount(ConversionForm, { props: { balance: '100', busy: false } })
+    expect((wrapper.get('[aria-label="兑换数量"]').element as HTMLInputElement).value).toBe('1')
+
+    await wrapper.get('[aria-label="兑换金额"]').setValue('2.5')
+    await wrapper.get('[aria-label="兑换数量"]').setValue('3')
+
+    expect(wrapper.text()).toContain('预计扣除 7.5')
+    await wrapper.get('form').trigger('submit')
+    expect(wrapper.emitted('submit')).toEqual([[
+      { amount: '2.5', count: 3, totalAmount: '7.5' },
+    ]])
   })
 
   it('fills the normalized plain-decimal balance from the all-balance button', async () => {
@@ -119,7 +156,17 @@ describe('ConversionForm', () => {
 
     await wrapper.get('[data-testid="fill-balance"]').trigger('click')
 
-    expect((wrapper.get('input').element as HTMLInputElement).value).toBe('10.5')
+    expect((wrapper.get('[aria-label="兑换金额"]').element as HTMLInputElement).value).toBe('10.5')
+  })
+
+  it('floors all balance across the selected count', async () => {
+    const wrapper = mount(ConversionForm, { props: { balance: '10', busy: false } })
+    await wrapper.get('[aria-label="兑换数量"]').setValue('3')
+    await wrapper.get('[data-testid="fill-balance"]').trigger('click')
+
+    expect((wrapper.get('[aria-label="兑换金额"]').element as HTMLInputElement).value)
+      .toBe('3.33333333')
+    expect(wrapper.text()).toContain('预计扣除 9.99999999')
   })
 })
 
@@ -129,13 +176,16 @@ describe('ConfirmDialog', () => {
   it('shows the conversion facts and emits confirmation only after the explicit click', async () => {
     const wrapper = mount(ConfirmDialog, {
       attachTo: document.body,
-      props: { open: true, amount: '2.5', busy: false },
+      props: { open: true, amount: '2.5', count: 3, totalAmount: '7.5', busy: false },
     })
 
     expect(wrapper.attributes('role')).toBe('dialog')
     expect(wrapper.attributes('aria-modal')).toBe('true')
-    expect(wrapper.text()).toContain('扣除余额')
-    expect(wrapper.text()).toContain('兑换码面值')
+    expect(wrapper.text()).toContain('单码面值')
+    expect(wrapper.text()).toContain('数量')
+    expect(wrapper.text()).toContain('3')
+    expect(wrapper.text()).toContain('总扣款')
+    expect(wrapper.text()).toContain('7.5')
     expect(wrapper.text()).toContain('1:1')
     expect(wrapper.text()).toContain('永久有效')
     expect(wrapper.emitted('confirm')).toBeUndefined()
@@ -147,7 +197,7 @@ describe('ConfirmDialog', () => {
   it('closes with Escape, traps focus in both directions, and blocks close or repeat while busy', async () => {
     const wrapper = mount(ConfirmDialog, {
       attachTo: document.body,
-      props: { open: true, amount: '2.5', busy: false },
+      props: { open: true, amount: '2.5', count: 3, totalAmount: '7.5', busy: false },
     })
     await nextTick()
     const focusable = wrapper.findAll('button')
@@ -183,7 +233,7 @@ describe('ConfirmDialog', () => {
     opener.focus()
     const wrapper = mount(ConfirmDialog, {
       attachTo: document.body,
-      props: { open: true, amount: '2.5', busy: false },
+      props: { open: true, amount: '2.5', count: 3, totalAmount: '7.5', busy: false },
     })
     await nextTick()
 
@@ -199,45 +249,46 @@ describe('ConversionResult', () => {
     clipboardController.copyText.mockResolvedValue(true)
     const wrapper = mount(ConversionResult, {
       props: {
-        result: {
-          status: 'completed', operation_id: 'op-1', amount: '2.5',
-          code: 'CODE-SECRET', created_at: '2026-07-13T00:00:00.000Z',
-        },
+        result: completedBatch(1, 'op-1'),
         pending: null,
       },
     })
 
-    expect(wrapper.text()).toContain('CODE-SECRET')
-    const copy = wrapper.get('[aria-label="复制兑换码"]')
+    expect(wrapper.text()).toContain('CODE-1')
+    const copy = wrapper.get('[aria-label="复制兑换码 CODE-1"]')
     expect(copy.attributes('title')).toBe('复制兑换码')
     await copy.trigger('click')
     await nextTick()
-    expect(clipboardController.copyText).toHaveBeenCalledWith('CODE-SECRET')
+    expect(clipboardController.copyText).toHaveBeenCalledWith('CODE-1')
     expect(wrapper.text()).toContain('已复制')
 
-    await wrapper.setProps({
-      result: {
-        status: 'completed', operation_id: 'op-2', amount: '3',
-        code: 'CODE-NEW', created_at: '2026-07-13T00:01:00.000Z',
-      },
-    })
+    await wrapper.setProps({ result: completedBatch(1, 'op-2') })
     await nextTick()
     expect(wrapper.text()).not.toContain('已复制')
+  })
+
+  it('shows and copies every completed code', async () => {
+    clipboardController.copyText.mockResolvedValue(true)
+    const wrapper = mount(ConversionResult, {
+      props: { result: completedBatch(3), pending: null },
+    })
+
+    expect(wrapper.findAll('.code-row')).toHaveLength(3)
+    await wrapper.get('[data-testid="copy-result-all"]').trigger('click')
+    expect(clipboardController.copyText).toHaveBeenCalledWith('CODE-1\nCODE-2\nCODE-3')
+    expect(wrapper.text()).toContain('已复制全部')
   })
 
   it('shows manual-copy feedback when compatible copying fails', async () => {
     clipboardController.copyText.mockResolvedValue(false)
     const wrapper = mount(ConversionResult, {
       props: {
-        result: {
-          status: 'completed', operation_id: 'op-copy-fail', amount: '1',
-          code: 'CODE-BLOCKED', created_at: '2026-07-14T00:00:00.000Z',
-        },
+        result: completedBatch(1, 'op-copy-fail'),
         pending: null,
       },
     })
 
-    await wrapper.get('[aria-label="复制兑换码"]').trigger('click')
+    await wrapper.get('[aria-label="复制兑换码 CODE-1"]').trigger('click')
     await nextTick()
 
     expect(wrapper.text()).toContain('复制失败，请手动复制')
@@ -279,7 +330,8 @@ describe('PendingOperation', () => {
     const wrapper = mount(PendingOperation, {
       props: {
         operation: {
-          version: 1,
+          version: 2,
+          count: 1,
           operation_id: 'op-ready',
           amount: '2.5',
           state: 'ready',
@@ -302,7 +354,8 @@ describe('PendingOperation', () => {
     const wrapper = mount(PendingOperation, {
       props: {
         operation: {
-          version: 1,
+          version: 2,
+          count: 1,
           operation_id: 'op-expired',
           amount: '2.5',
           state: 'expired',
@@ -318,9 +371,12 @@ describe('PendingOperation', () => {
 })
 
 describe('HistoryList', () => {
-  const items = [{
-    version: 1 as const,
+  const items: HistoryItem[] = [{
+    version: 2,
+    history_id: 'op-1:1',
     operation_id: 'op-1',
+    batch_index: 1,
+    batch_size: 2,
     amount: '2.5',
     code: 'CODE-ONE',
     created_at: '2026-07-13T00:00:00.000Z',
@@ -338,6 +394,7 @@ describe('HistoryList', () => {
     expect(clipboardController.copyText).toHaveBeenNthCalledWith(1, 'CODE-ONE')
     expect(clipboardController.copyText.mock.calls[1]?.[0]).toContain('op-1')
     expect(clipboardController.copyText.mock.calls[1]?.[0]).toContain('CODE-ONE')
+    expect(wrapper.text()).toContain('1/2')
   })
 
   it('shows manual-copy feedback when history copying fails', async () => {
@@ -370,7 +427,7 @@ describe('App', () => {
     expect(wrapper.text()).toContain('余额兑换码')
     expect(appController.initialize).toHaveBeenCalledTimes(1)
 
-    await wrapper.get('input').setValue('1')
+    await wrapper.get('[aria-label="兑换金额"]').setValue('1')
     await wrapper.get('form').trigger('submit')
 
     expect(wrapper.find('[role="dialog"]').exists()).toBe(true)
@@ -398,9 +455,10 @@ describe('App', () => {
 
   it('shows stored recovery metadata without its token and hiding lasts only for the current mount', async () => {
     appController.pendingOperation = {
-      version: 1,
+      version: 2,
       operation_id: 'op-recovery',
       amount: '2.5',
+      count: 1,
       state: 'ready',
       operation_token: 'MUST-NOT-RENDER',
       expires_at: '2099-07-13T01:00:00.000Z',
@@ -409,7 +467,7 @@ describe('App', () => {
 
     expect(wrapper.text()).toContain('op-recovery')
     expect(wrapper.text()).not.toContain('MUST-NOT-RENDER')
-    await wrapper.get('input').setValue('1')
+    await wrapper.get('[aria-label="兑换金额"]').setValue('1')
     expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeDefined()
     await wrapper.get('[data-testid="resume-pending"]').trigger('click')
     expect(appController.resumePending).toHaveBeenCalledTimes(1)
@@ -425,17 +483,12 @@ describe('App', () => {
   })
 
   it('does not render an old completed code while another operation needs recovery', () => {
-    appController.result = {
-      status: 'completed',
-      operation_id: 'op-first',
-      amount: '1',
-      code: 'CODE-FIRST',
-      created_at: '2026-07-13T00:00:00.000Z',
-    }
+    appController.result = completedBatch(1, 'op-first')
     appController.pendingOperation = {
-      version: 1,
+      version: 2,
       operation_id: 'op-second',
       amount: '2',
+      count: 1,
       state: 'pending',
       operation_token: 'second-secret',
       expires_at: '2099-07-13T01:00:00.000Z',
@@ -444,7 +497,7 @@ describe('App', () => {
     const wrapper = mount(App)
 
     expect(wrapper.text()).toContain('op-second')
-    expect(wrapper.text()).not.toContain('CODE-FIRST')
+    expect(wrapper.text()).not.toContain('CODE-1')
     wrapper.unmount()
     appController.result = null
     appController.pendingOperation = null
@@ -453,7 +506,7 @@ describe('App', () => {
   it('disables conversion while shared storage safety is unconfirmed', async () => {
     appController.storageReady = false
     const wrapper = mount(App)
-    await wrapper.get('input').setValue('1')
+    await wrapper.get('[aria-label="兑换金额"]').setValue('1')
 
     expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeDefined()
 

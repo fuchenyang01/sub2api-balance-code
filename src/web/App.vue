@@ -9,26 +9,27 @@ import ConversionResult from './components/ConversionResult.vue'
 import HistoryList from './components/HistoryList.vue'
 import PendingOperation from './components/PendingOperation.vue'
 import { useConversion } from './composables/useConversion.js'
+import type { ConversionDraft } from './conversion-input.js'
 
 const conversion = useConversion()
-const confirmationAmount = ref<string | null>(null)
+const confirmation = ref<ConversionDraft | null>(null)
 const pendingHidden = ref(false)
 const authenticated = computed(() => conversion.session.value === 'authenticated' && conversion.profile.value !== null)
 
-function openConfirmation(amount: string): void {
+function openConfirmation(draft: ConversionDraft): void {
   if (conversion.pendingOperation.value !== null) return
-  confirmationAmount.value = amount
+  confirmation.value = draft
 }
 
 function closeConfirmation(): void {
-  if (!conversion.busy.value) confirmationAmount.value = null
+  if (!conversion.busy.value) confirmation.value = null
 }
 
 async function confirmConversion(): Promise<void> {
-  const amount = confirmationAmount.value
-  if (amount === null || conversion.busy.value) return
-  await conversion.convert(amount)
-  confirmationAmount.value = null
+  const draft = confirmation.value
+  if (draft === null || conversion.busy.value) return
+  await conversion.convert(draft.amount, draft.count)
+  confirmation.value = null
 }
 
 watch(
@@ -128,8 +129,10 @@ onMounted(() => {
     </main>
 
     <ConfirmDialog
-      :open="confirmationAmount !== null"
-      :amount="confirmationAmount ?? ''"
+      :open="confirmation !== null"
+      :amount="confirmation?.amount ?? ''"
+      :count="confirmation?.count ?? 1"
+      :total-amount="confirmation?.totalAmount ?? ''"
       :busy="conversion.busy.value"
       @cancel="closeConfirmation"
       @confirm="confirmConversion"
