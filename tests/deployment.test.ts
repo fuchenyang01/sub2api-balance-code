@@ -23,7 +23,7 @@ describe('deployment contracts', () => {
       scripts?: Record<string, string>
     }
     expect(packageJson.scripts?.dev).toBe(
-      'tsx --env-file=.env watch src/server/main.ts',
+      'tsx watch --env-file=.env src/server/main.ts',
     )
   })
 })
