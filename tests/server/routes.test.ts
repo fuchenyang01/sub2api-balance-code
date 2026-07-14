@@ -583,6 +583,7 @@ describe('security headers, rate limits, and logging', () => {
       .find((directive) => directive.startsWith('frame-ancestors '))
     expect(frameAncestors).toBe(`frame-ancestors 'self' ${sub2apiOrigin}`)
     expect(frameAncestors).not.toContain('*')
+    expect(response.headers['x-frame-options']).toBeUndefined()
     expect(response.headers['referrer-policy']).toBe('no-referrer')
     expect(response.headers['x-content-type-options']).toBe('nosniff')
   })

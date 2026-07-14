@@ -216,6 +216,7 @@ export function buildApp(
           frameAncestors: ["'self'", config.sub2apiOrigin],
         },
       },
+      xFrameOptions: false,
       referrerPolicy: { policy: 'no-referrer' },
     })
     await routes.register(rateLimit, { global: false })
