@@ -6,6 +6,7 @@ import type {
   PrepareRequest,
   PrepareResponse,
 } from '../../shared/contracts.js'
+import { MAX_BATCH_COUNT, MIN_BATCH_COUNT } from '../../shared/contracts.js'
 import type { SessionReader } from './session.js'
 
 export interface ConversionOperations {
@@ -14,6 +15,7 @@ export interface ConversionOperations {
     userId: number,
     operationId: string,
     rawAmount: string,
+    count: number,
   ): Promise<PrepareResponse>
   execute(operationToken: string, userJwt: string, userId: number): Promise<ExecuteResponse>
 }
@@ -22,10 +24,11 @@ const uuidV4Pattern = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0
 
 const prepareBodySchema = {
   type: 'object',
-  required: ['operation_id', 'amount'],
+  required: ['operation_id', 'amount', 'count'],
   properties: {
     operation_id: { type: 'string', pattern: uuidV4Pattern },
     amount: { type: 'string', minLength: 1, maxLength: 128 },
+    count: { type: 'integer', minimum: MIN_BATCH_COUNT, maximum: MAX_BATCH_COUNT },
   },
   additionalProperties: false,
 } as const
@@ -100,6 +103,7 @@ export function registerConversionRoutes(
         session.userId,
         request.body.operation_id,
         request.body.amount,
+        request.body.count,
       )
     },
   )

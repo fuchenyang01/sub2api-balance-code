@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { CompactEncrypt, SignJWT, compactDecrypt, errors, jwtVerify } from 'jose'
 import type { JWTPayload } from 'jose'
 
+import { MAX_BATCH_COUNT, MIN_BATCH_COUNT } from '../../shared/contracts.js'
 import { normalizeAmount } from '../amount.js'
 import { AppError } from '../errors.js'
 
@@ -31,6 +32,7 @@ export interface OperationPayload {
   operationId: string
   userId: number
   amount: string
+  count: number
   issuedAt: string
   expiresAt: string
 }
@@ -89,6 +91,19 @@ function expiredOperation(): AppError {
   return new AppError('OPERATION_TOKEN_EXPIRED', 401, '操作令牌已过期')
 }
 
+function operationCount(value: unknown): number {
+  if (value === undefined) return 1
+  if (
+    typeof value !== 'number'
+    || !Number.isSafeInteger(value)
+    || value < MIN_BATCH_COUNT
+    || value > MAX_BATCH_COUNT
+  ) {
+    throw invalidOperation()
+  }
+  return value
+}
+
 function internalSecurityError(): Error {
   return new Error('安全操作失败')
 }
@@ -113,6 +128,7 @@ function validateOperationPayload(
   }
 
   const userId = Number(payload.sub)
+  const count = operationCount(payload.count)
   const issuedAt = numericDateToIso(payload.iat)
   const expiresAt = numericDateToIso(payload.exp)
   if (
@@ -131,6 +147,7 @@ function validateOperationPayload(
     operationId: payload.jti,
     userId,
     amount: payload.amount,
+    count,
     issuedAt,
     expiresAt,
   }
@@ -241,12 +258,14 @@ export class SecretsService {
     operationId: string
     userId: number
     amount: string
+    count: number
   }): Promise<{ token: string; expiresAt: string }> {
     if (
       typeof input.operationId !== 'string' ||
       !uuidV4Pattern.test(input.operationId) ||
       !isPositiveInteger(input.userId) ||
-      !isCanonicalAmount(input.amount)
+      !isCanonicalAmount(input.amount) ||
+      operationCount(input.count) !== input.count
     ) {
       throw invalidOperation()
     }
@@ -254,7 +273,7 @@ export class SecretsService {
     const issuedAtSeconds = Math.floor(this.#currentDate().getTime() / 1000)
     const expiresAtSeconds = issuedAtSeconds + this.#operationTtlSeconds
     try {
-      const token = await new SignJWT({ version: 1, amount: input.amount })
+      const token = await new SignJWT({ version: 1, amount: input.amount, count: input.count })
         .setProtectedHeader({ alg: 'HS256' })
         .setIssuer(operationIssuer)
         .setAudience(operationAudience)

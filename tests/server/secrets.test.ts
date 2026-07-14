@@ -102,6 +102,20 @@ async function makeOperationToken(
     .sign(derivedKey(options.secret ?? operationSecret))
 }
 
+function operationClaims(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    version: 1,
+    amount: '1.23',
+    iss: 'sub2api-balance-code',
+    aud: 'balance-conversion',
+    sub: '42',
+    jti: operationId,
+    iat: Math.floor(now.getTime() / 1_000),
+    exp: Math.floor(now.getTime() / 1_000) + 3_600,
+    ...overrides,
+  }
+}
+
 describe('SecretsService sessions', () => {
   it('encrypts session contents and decrypts the original payload', async () => {
     const expiresAt = new Date('2026-07-13T09:00:00.000Z')
@@ -199,7 +213,7 @@ describe('SecretsService sessions', () => {
 
 describe('SecretsService operation tokens', () => {
   it('signs and verifies a normalized payload with the configured lifetime', async () => {
-    const signed = await service().signOperation({ operationId, userId: 42, amount: '1.23' })
+    const signed = await service().signOperation({ operationId, userId: 42, amount: '1.23', count: 1 })
 
     expect(signed.expiresAt).toBe('2026-07-13T09:00:00.000Z')
     await expect(service().verifyOperation(signed.token, 42)).resolves.toEqual({
@@ -207,6 +221,7 @@ describe('SecretsService operation tokens', () => {
       operationId,
       userId: 42,
       amount: '1.23',
+      count: 1,
       issuedAt: '2026-07-13T08:00:00.000Z',
       expiresAt: '2026-07-13T09:00:00.000Z',
     })
@@ -215,27 +230,52 @@ describe('SecretsService operation tokens', () => {
   it.each(['0.0000001', '0.00000001', '1000000000000000000000'])(
     'signs and verifies canonical plain decimal amount %s',
     async (amount) => {
-      const signed = await service().signOperation({ operationId, userId: 42, amount })
+      const signed = await service().signOperation({ operationId, userId: 42, amount, count: 1 })
 
       await expect(service().verifyOperation(signed.token, 42)).resolves.toMatchObject({ amount })
     },
   )
 
+  it('signs and verifies an explicit batch count', async () => {
+    const signed = await service().signOperation({
+      operationId,
+      userId: 42,
+      amount: '1.23',
+      count: 100,
+    })
+    await expect(service().verifyOperation(signed.token, 42)).resolves.toMatchObject({
+      operationId,
+      userId: 42,
+      amount: '1.23',
+      count: 100,
+    })
+  })
+
+  it('treats a valid legacy operation without count as a single-code batch', async () => {
+    const token = await makeOperationToken(operationClaims())
+    await expect(service().verifyOperation(token, 42)).resolves.toMatchObject({ count: 1 })
+  })
+
+  it.each([0, 101, 1.5, '2'])('rejects invalid operation count %s', async (count) => {
+    const token = await makeOperationToken(operationClaims({ count }))
+    await expectAppError(() => service().verifyOperation(token, 42), 'OPERATION_TOKEN_INVALID')
+  })
+
   it('binds verification to the expected user', async () => {
-    const { token } = await service().signOperation({ operationId, userId: 42, amount: '1.23' })
+    const { token } = await service().signOperation({ operationId, userId: 42, amount: '1.23', count: 1 })
     await expectAppError(() => service().verifyOperation(token, 7), 'OPERATION_TOKEN_INVALID')
   })
 
   it('reports an expired operation token distinctly using the injected clock', async () => {
     const signer = service({ now: () => new Date('2026-07-13T06:00:00.000Z') })
-    const { token } = await signer.signOperation({ operationId, userId: 42, amount: '1.23' })
+    const { token } = await signer.signOperation({ operationId, userId: 42, amount: '1.23', count: 1 })
 
     await expectAppError(() => service().verifyOperation(token, 42), 'OPERATION_TOKEN_EXPIRED')
   })
 
   it('does not report an expired token for the wrong expected user', async () => {
     const signer = service({ now: () => new Date('2026-07-13T06:00:00.000Z') })
-    const { token } = await signer.signOperation({ operationId, userId: 42, amount: '1.23' })
+    const { token } = await signer.signOperation({ operationId, userId: 42, amount: '1.23', count: 1 })
 
     await expectAppError(() => service().verifyOperation(token, 7), 'OPERATION_TOKEN_INVALID')
   })
@@ -263,7 +303,7 @@ describe('SecretsService operation tokens', () => {
   })
 
   it('rejects a token signed with a different operation secret', async () => {
-    const { token } = await service().signOperation({ operationId, userId: 42, amount: '1.23' })
+    const { token } = await service().signOperation({ operationId, userId: 42, amount: '1.23', count: 1 })
 
     await expectAppError(
       () => service({ operationSigningSecret: otherOperationSecret }).verifyOperation(token, 42),
@@ -272,7 +312,7 @@ describe('SecretsService operation tokens', () => {
   })
 
   it('rejects a token with deterministically tampered signature bytes', async () => {
-    const { token } = await service().signOperation({ operationId, userId: 42, amount: '1.23' })
+    const { token } = await service().signOperation({ operationId, userId: 42, amount: '1.23', count: 1 })
     const tampered = tamperCompactToken(token, 2)
 
     expect(tampered.token).not.toBe(token)
@@ -296,14 +336,17 @@ describe('SecretsService operation tokens', () => {
   })
 
   it.each([
-    { operationId: 'not-a-uuid', userId: 42, amount: '1.23' },
-    { operationId: '123e4567-e89b-12d3-a456-426614174000', userId: 42, amount: '1.23' },
-    { operationId, userId: 0, amount: '1.23' },
-    { operationId, userId: 1.5, amount: '1.23' },
-    { operationId, userId: 42, amount: '001.00' },
-    { operationId, userId: 42, amount: '1.00' },
-    { operationId, userId: 42, amount: '001.23000000' },
-    { operationId, userId: 42, amount: '1.23000000' },
+    { operationId: 'not-a-uuid', userId: 42, amount: '1.23', count: 1 },
+    { operationId: '123e4567-e89b-12d3-a456-426614174000', userId: 42, amount: '1.23', count: 1 },
+    { operationId, userId: 0, amount: '1.23', count: 1 },
+    { operationId, userId: 1.5, amount: '1.23', count: 1 },
+    { operationId, userId: 42, amount: '001.00', count: 1 },
+    { operationId, userId: 42, amount: '1.00', count: 1 },
+    { operationId, userId: 42, amount: '001.23000000', count: 1 },
+    { operationId, userId: 42, amount: '1.23000000', count: 1 },
+    { operationId, userId: 42, amount: '1.23', count: 0 },
+    { operationId, userId: 42, amount: '1.23', count: 101 },
+    { operationId, userId: 42, amount: '1.23', count: 1.5 },
   ])('rejects invalid operation input %#', async (input) => {
     await expectAppError(() => service().signOperation(input), 'OPERATION_TOKEN_INVALID')
   })
@@ -318,13 +361,13 @@ describe('SecretsService operation tokens', () => {
       userId: 42,
       expiresAt: new Date('2026-07-13T09:00:00.000Z'),
     })
-    const operationToken = (await service().signOperation({ operationId, userId: 42, amount: '1.23' })).token
+    const operationToken = (await service().signOperation({ operationId, userId: 42, amount: '1.23', count: 1 })).token
     const invalidClock = service({ now: () => new Date(Number.NaN) })
 
     const actions = [
       () => invalidClock.sealSession({ userJwt, userId: 42, expiresAt: new Date('2026-07-13T09:00:00.000Z') }),
       () => invalidClock.unsealSession(sessionToken),
-      () => invalidClock.signOperation({ operationId, userId: 42, amount: '1.23' }),
+      () => invalidClock.signOperation({ operationId, userId: 42, amount: '1.23', count: 1 }),
       () => invalidClock.verifyOperation(operationToken, 42),
     ]
     for (const action of actions) await expectSafeInternalError(action)
@@ -338,7 +381,7 @@ describe('SecretsService operation tokens', () => {
     })
 
     await expectSafeInternalError(() =>
-      subject.signOperation({ operationId, userId: 42, amount: '1.23' }),
+      subject.signOperation({ operationId, userId: 42, amount: '1.23', count: 1 }),
     )
   })
 
@@ -348,7 +391,7 @@ describe('SecretsService operation tokens', () => {
       userId: 42,
       expiresAt: new Date('2026-07-13T09:00:00.000Z'),
     })
-    const operationToken = (await service().signOperation({ operationId, userId: 42, amount: '1.23' })).token
+    const operationToken = (await service().signOperation({ operationId, userId: 42, amount: '1.23', count: 1 })).token
 
     const errors = [
       await expectAppError(
