@@ -26,3 +26,25 @@ test('keeps confirmation, result, and history readable without horizontal overfl
   await page.screenshot({ path: testInfo.outputPath('mobile.png'), fullPage: true })
   expectNoBrowserErrors(errors)
 })
+
+test('keeps the denied access state readable without horizontal overflow', async ({
+  page,
+  environment,
+}, testInfo) => {
+  environment.mock.setAllowedGroups([])
+
+  await page.goto(environment.authenticatedUrl())
+
+  await expect(page.getByRole('heading', { name: '暂无余额兑换权限' })).toBeVisible()
+  const errors = collectBrowserErrors(page)
+  await expect(page.getByText('重新检查', { exact: true })).toBeVisible()
+  await expect(page.getByLabel('兑换金额')).toHaveCount(0)
+  const overflow = await page.evaluate(() => ({
+    document: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    body: document.body.scrollWidth - document.body.clientWidth,
+  }))
+  expect(overflow.document).toBeLessThanOrEqual(0)
+  expect(overflow.body).toBeLessThanOrEqual(0)
+  await page.screenshot({ path: testInfo.outputPath('mobile-unauthorized.png'), fullPage: true })
+  expectNoBrowserErrors(errors)
+})
