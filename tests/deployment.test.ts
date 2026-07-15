@@ -43,6 +43,10 @@ describe('deployment contracts', () => {
 
     expect(workflow).toContain('前端隐藏不是安全边界')
     expect(workflow).toContain('每次受保护请求')
+    expect(workflow).toContain('实时 profile 的 `allowed_groups`')
+    expect(workflow).toContain('是否包含 `.env` 中配置的分组 ID')
+    expect(workflow).toContain('工具无法确认该分组是否为“启用”或“专属”')
+    expect(workflow).toContain('管理员必须在 sub2api 后台保证')
     expect(setup).toContain('登录 sub2api 管理后台')
     expect(setup).toContain('分组管理')
     expect(setup).toContain('分销代理')
@@ -87,6 +91,30 @@ describe('deployment contracts', () => {
     expect(reference).toContain('只填数字不带 `#`')
   })
 
+  it('documents the required allowed-group migration before replacing a deployment', () => {
+    const readme = repositoryFile('README.md')
+    const upgrade = sectionBetween(
+      readme,
+      '### 升级项目',
+      '升级失败时，在同一个 SSH 会话中回滚旧镜像：',
+    )
+
+    expect(upgrade).toContain('对照最新的 `.env.example`')
+    expect(upgrade).toContain('REDEEM_ALLOWED_GROUP_ID=24')
+    expect(upgrade).toContain('按实际专属分组 ID 填写')
+    expect(upgrade).toContain('缺少该变量会导致新容器拒绝启动')
+
+    const pullIndex = upgrade.indexOf('git pull --ff-only')
+    const allowedGroupIndex = upgrade.indexOf('REDEEM_ALLOWED_GROUP_ID=24')
+    const buildIndex = upgrade.indexOf('sudo docker build')
+    const removeIndex = upgrade.indexOf('sudo docker rm -f')
+
+    expect(pullIndex).toBeGreaterThanOrEqual(0)
+    expect(allowedGroupIndex).toBeGreaterThan(pullIndex)
+    expect(buildIndex).toBeGreaterThan(allowedGroupIndex)
+    expect(removeIndex).toBeGreaterThan(buildIndex)
+  })
+
   it('documents access denial troubleshooting and custom menu limits', () => {
     const readme = repositoryFile('README.md')
     const menu = sectionBetween(
@@ -98,6 +126,11 @@ describe('deployment contracts', () => {
       readme,
       '### 页面显示“暂无余额兑换权限”',
       '### 生成兑换码后余额没有刷新',
+    )
+    const startupTroubleshooting = sectionBetween(
+      readme,
+      '### 容器启动后立即退出',
+      '### `healthz` 无法访问',
     )
 
     expect(menu).toMatch(/自定义菜单.*普通用户可见.*管理员可见/)
@@ -116,6 +149,12 @@ describe('deployment contracts', () => {
     expect(troubleshooting).toMatch(
       /重新加入并保存分组后.*点击“重新检查”/,
     )
+    expect(troubleshooting).toMatch(
+      /REDEEM_ALLOWED_GROUP_ID.*实际分组 ID.*不一致.*服务可以启动.*用户.*无权限/,
+    )
+    expect(startupTroubleshooting).toMatch(
+      /REDEEM_ALLOWED_GROUP_ID.*缺失.*带.*`#`.*非正整数/,
+    )
     expect(readme).not.toMatch(/SUB2API_ADMIN_API_KEY=admin-[^\s]+/)
     expect(readme).not.toMatch(/[?&]token=(?!\.\.\.)[A-Za-z0-9_-]{16,}/)
   })
@@ -133,8 +172,21 @@ describe('deployment contracts', () => {
       '### 页面显示需要登录或返回 401',
     )
 
-    expect(prerequisites.match(/cyapi\.cyou/g)).toHaveLength(5)
-    expect(iframeTroubleshooting.match(/cyapi\.cyou/g)).toHaveLength(3)
+    expect(prerequisites).toContain(
+      '| `sub.example.com` | 现有 sub2api 地址 | 你的 sub2api 域名，例如 `www.cyapi.cyou` |',
+    )
+    expect(prerequisites).toContain(
+      '| `code.example.com` | 本工具地址 | 与 sub2api 同主域的子域，例如 `code.cyapi.cyou` |',
+    )
+    expect(prerequisites).toContain(
+      '`www.cyapi.cyou` 和 `code.cyapi.cyou` 可以',
+    )
+    expect(iframeTroubleshooting).toMatch(
+      /sub2api: https:\/\/www\.cyapi\.cyou\r?\n工具:\s+http:\/\/localhost:5173/,
+    )
+    expect(iframeTroubleshooting).toMatch(
+      /sub2api: https:\/\/www\.cyapi\.cyou\r?\n工具:\s+https:\/\/code\.cyapi\.cyou/,
+    )
   })
 
   it('loads the local server environment from .env in the dev command', () => {

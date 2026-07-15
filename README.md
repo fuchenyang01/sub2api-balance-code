@@ -76,13 +76,15 @@
 3. sub2api 自定义页面自动把当前用户 JWT 附加到工具 URL。
 4. 工具后端拿该 JWT 请求 sub2api 的 `/api/v1/user/profile`。
 5. 工具只采用 profile 返回的真实用户 ID、用户名、余额和分组，不信任 URL 中的 `user_id`。
-6. 工具确认用户属于 `.env` 指定的、已启用的 sub2api 专属分组。
+6. 工具检查实时 profile 的 `allowed_groups` 是否包含 `.env` 中配置的分组 ID。
 7. 验证成功后，工具把 `用户 JWT + 用户 ID` 加密到 HttpOnly Cookie。
 8. 用户提交单码面值和数量后，工具再次读取实时 profile，并签发绑定用户、单码面值、数量和操作 ID 的短期操作令牌。
 9. 工具使用只保存在服务端的管理员 API Key，一次请求生成整批兑换码，再用一次请求从已经验证的用户 ID 扣减总额。
 10. 页面一次显示整批兑换码，并重新查询一次实时余额。
 
-前端隐藏不是安全边界。后续的 `/api/me`、准备兑换和执行兑换都是受保护请求，服务端会在每次受保护请求中重新向 sub2api 验证用户状态和专属分组。浏览器提交的用户名、用户 ID、余额或分组都不会被当作可信数据。
+工具只能根据实时 profile 的 `allowed_groups` 判断用户是否拥有该分组 ID，工具无法确认该分组是否为“启用”或“专属”。管理员必须在 sub2api 后台保证该 ID 对应一个已启用的专属分组。
+
+前端隐藏不是安全边界。后续的 `/api/me`、准备兑换和执行兑换都是受保护请求，服务端会在每次受保护请求中重新向 sub2api 验证用户状态和 `allowed_groups`。浏览器提交的用户名、用户 ID、余额或分组都不会被当作可信数据。
 
 ## 批量生成怎么用
 
@@ -604,6 +606,23 @@ git status --short
 OLD_COMMIT=$(git rev-parse --short HEAD)
 sudo docker tag sub2api-balance-code:local "sub2api-balance-code:backup-$OLD_COMMIT"
 git pull --ff-only
+```
+
+从旧部署升级到包含分组权限的版本时，拉取代码后必须先对照最新的 `.env.example` 检查 `.env`，并添加下面这一行。`24` 是本项目的示例值，请按实际专属分组 ID 填写：
+
+```env
+REDEEM_ALLOWED_GROUP_ID=24
+```
+
+缺少该变量会导致新容器拒绝启动。不要填写 `#24`、分组名称或公开分组 ID。保存后先检查：
+
+```bash
+grep '^REDEEM_ALLOWED_GROUP_ID=' .env
+```
+
+确认输出只有一行、等号后是正确的正整数，再构建镜像并删除旧容器：
+
+```bash
 sudo docker build -t sub2api-balance-code:local .
 sudo docker rm -f sub2api-balance-code
 sudo docker run -d \
@@ -657,6 +676,7 @@ sudo docker logs --tail 200 sub2api-balance-code
 - 两条安全密钥不足 32 字节或完全相同。
 - 生产 URL 使用了 `http://`。
 - `COOKIE_SECURE` 不是 `true`。
+- `REDEEM_ALLOWED_GROUP_ID` 缺失、带了 `#` 或为非正整数。
 - `.env` 中某个值被误加了路径、查询参数或空格。
 
 修改 `.env` 后，需要删除并重建容器才能载入新配置：
@@ -777,6 +797,8 @@ sub2api: https://www.cyapi.cyou
 2. 在“用户管理 -> 分组配置”中确认该用户已勾选“分销代理”。
 3. 在分组列表右上角的“列设置”显示 ID，确认数字 ID 与 `.env` 中的 `REDEEM_ALLOWED_GROUP_ID` 完全一致。
 4. 如果修改过 `.env`，按“[容器启动后立即退出](#容器启动后立即退出)”中的命令删除并重建容器，不要只重启容器。
+
+`REDEEM_ALLOWED_GROUP_ID` 与实际分组 ID 不一致时，服务可以启动，但用户会显示无权限；这不是容器启动失败。
 
 用户被移出专属分组后，下一个受保护请求会立即返回 HTTP 403，已打开的页面也不能继续兑换。重新加入并保存分组后，让用户回到页面点击“重新检查”。
 
