@@ -281,6 +281,10 @@ describe('useConversion initialization', () => {
     history.replaceState(null, '', '/')
   })
 
+  afterEach(() => {
+    history.replaceState(null, '', '/')
+  })
+
   it('exchanges a URL token once, removes sensitive query data, preserves safe data, then loads live profile', async () => {
     history.replaceState(
       null,
@@ -352,6 +356,70 @@ describe('useConversion initialization', () => {
     )
     expect(conversion.session.value).toBe('authenticated')
     expect(conversion.profile.value).toEqual(profile)
+  })
+
+  it('keeps an access-denied URL token in memory and retries it on refresh', async () => {
+    history.replaceState(null, '', '/?token=user-jwt')
+    const exchange = vi.fn()
+      .mockRejectedValueOnce(new ApiClientError('REDEEM_ACCESS_DENIED', 403, 'denied'))
+      .mockResolvedValueOnce(profile)
+    const me = vi.fn().mockResolvedValue(profile)
+    const conversion = createUseConversion(api({ exchange, me }))
+
+    await conversion.initialize()
+
+    expect(location.search).toBe('')
+    expect(exchange).toHaveBeenCalledTimes(1)
+    expect(me).not.toHaveBeenCalled()
+    expect(conversion.session.value).toBe('unauthorized')
+    expect(conversion.profile.value).toBeNull()
+
+    await conversion.refresh()
+
+    expect(exchange).toHaveBeenCalledTimes(2)
+    expect(exchange).toHaveBeenLastCalledWith('user-jwt')
+    expect(me).toHaveBeenCalledTimes(1)
+    expect(conversion.session.value).toBe('authenticated')
+    expect(conversion.profile.value).toEqual(profile)
+  })
+
+  it('preserves pending recovery when an authenticated profile refresh loses access', async () => {
+    const ready: PendingOperation = {
+      version: 2,
+      operation_id: 'pending-access-check',
+      amount: '2.5',
+      count: 1,
+      state: 'ready',
+      operation_token: 'pending-secret',
+      expires_at: expiresAt,
+    }
+    const shared = sharedStorage(ready)
+    const me = vi.fn()
+      .mockResolvedValueOnce(profile)
+      .mockRejectedValueOnce(new ApiClientError('REDEEM_ACCESS_DENIED', 403, 'denied'))
+    const conversion = createUseConversion(api({ me }), shared.store)
+
+    await conversion.initialize()
+    await conversion.refresh()
+
+    expect(conversion.session.value).toBe('unauthorized')
+    expect(conversion.profile.value).toBeNull()
+    expect(conversion.pendingOperation.value).toEqual(ready)
+    expect(shared.pending()).toEqual(ready)
+    expect(shared.clearPending).not.toHaveBeenCalled()
+  })
+
+  it('marks redemption access denial as non-retryable', async () => {
+    const conversion = createUseConversion(api({
+      me: vi.fn().mockRejectedValue(new ApiClientError('REDEEM_ACCESS_DENIED', 403, 'denied')),
+    }))
+
+    await conversion.initialize()
+
+    expect(conversion.error.value).toMatchObject({
+      code: 'REDEEM_ACCESS_DENIED',
+      retryable: false,
+    })
   })
 
   it('removes empty token and user_id parameters before using the cookie session', async () => {

@@ -14,6 +14,7 @@ const styles = readFileSync(join(process.cwd(), 'src/web/styles.css'), 'utf8')
 
 const appController = vi.hoisted((): {
   session: string
+  profile: null | { id: number; username: string; balance: string }
   error: null | { code: string; message: string; requestId: string; retryable: boolean }
   convert: ReturnType<typeof vi.fn>
   initialize: ReturnType<typeof vi.fn>
@@ -26,6 +27,7 @@ const appController = vi.hoisted((): {
   storageReady: boolean
 } => ({
   session: 'authenticated',
+  profile: { id: 7, username: 'alice', balance: '10' },
   error: null,
   convert: vi.fn(),
   initialize: vi.fn(),
@@ -51,7 +53,7 @@ vi.mock('../../src/web/composables/useConversion.js', async (importOriginal) => 
     ...actual,
     useConversion: () => ({
       session: ref(appController.session),
-      profile: ref({ id: 7, username: 'alice', balance: '10' }),
+      profile: ref(appController.profile),
       result: ref(appController.result),
       pending: ref(null),
       pendingOperation: ref(appController.pendingOperation),
@@ -79,6 +81,18 @@ import HistoryList from '../../src/web/components/HistoryList.vue'
 import PendingOperation from '../../src/web/components/PendingOperation.vue'
 
 beforeEach(() => {
+  appController.session = 'authenticated'
+  appController.profile = { id: 7, username: 'alice', balance: '10' }
+  appController.error = null
+  appController.pendingOperation = null
+  appController.result = null
+  appController.history = []
+  appController.storageReady = true
+  appController.convert.mockReset()
+  appController.initialize.mockReset()
+  appController.refresh.mockReset()
+  appController.resumePending.mockReset()
+  appController.clearHistory.mockReset()
   clipboardController.copyText.mockReset()
 })
 
@@ -451,6 +465,46 @@ describe('App', () => {
 
     appController.session = 'authenticated'
     appController.error = null
+  })
+
+  it('hides conversion and recovery data when the account lacks redemption access', async () => {
+    appController.session = 'unauthorized'
+    appController.profile = null
+    appController.pendingOperation = {
+      version: 2,
+      operation_id: 'hidden-operation',
+      amount: '2.5',
+      count: 1,
+      state: 'ready',
+      operation_token: 'hidden-token',
+      expires_at: '2099-07-13T01:00:00.000Z',
+    }
+    appController.result = completedBatch(1, 'hidden-result')
+    appController.history = [{
+      version: 2,
+      history_id: 'hidden-operation:1',
+      operation_id: 'hidden-operation',
+      batch_index: 1,
+      batch_size: 1,
+      amount: '2.5',
+      code: 'hidden-history',
+      created_at: '2026-07-14T00:00:00.000Z',
+    }]
+    const wrapper = mount(App)
+
+    expect(wrapper.text()).toContain('暂无余额兑换权限')
+    expect(wrapper.text()).toContain('当前账号未加入“分销代理”专属分组，请联系管理员。')
+    expect(wrapper.find('[aria-label="兑换金额"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('hidden-operation')
+    expect(wrapper.text()).not.toContain('hidden-token')
+    expect(wrapper.text()).not.toContain('hidden-history')
+    expect(wrapper.text()).not.toContain('发现待处理操作')
+    expect(wrapper.text()).not.toContain('历史兑换码')
+    expect(wrapper.find('[data-testid="resume-pending"]').exists()).toBe(false)
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+
+    await wrapper.get('[data-testid="retry-access"]').trigger('click')
+    expect(appController.refresh).toHaveBeenCalledTimes(1)
   })
 
   it('shows stored recovery metadata without its token and hiding lasts only for the current mount', async () => {
