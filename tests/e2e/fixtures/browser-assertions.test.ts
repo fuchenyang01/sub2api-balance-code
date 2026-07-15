@@ -28,6 +28,17 @@ describe('authorization browser error filtering', () => {
     }))).toEqual({ consoleErrors: [], pageErrors: [] })
   })
 
+  it.each([
+    ['GET', 'http://127.0.0.1:41002/api/session/exchange'],
+    ['POST', 'http://127.0.0.1:41002/api/me'],
+  ])('preserves the resource error for an authorization path with the wrong %s method', (method, url) => {
+    const consoleError = { text: chromium403, url }
+    expect(unexpectedBrowserErrors(errors({
+      consoleErrors: [consoleError],
+      responses: [{ method, url, status: 403 }],
+    }))).toEqual({ consoleErrors: [consoleError], pageErrors: [] })
+  })
+
   it('does not filter other responses, console errors, or page errors', () => {
     const url = 'http://127.0.0.1:41002/api/me'
     const pageError = 'Vue render failed'
