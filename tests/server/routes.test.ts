@@ -209,6 +209,17 @@ describe('session routes', () => {
     expect(session.expiresAt).toBe(new Date(exp * 1_000).toISOString())
   })
 
+  it('denies session exchange when the verified profile lacks redemption access', async () => {
+    const { app, users } = await setup()
+    users.currentProfile = { ...profile, allowed_groups: [] }
+
+    const response = await exchange(app)
+
+    expect(response.statusCode).toBe(403)
+    stableError(response, 'REDEEM_ACCESS_DENIED')
+    expect(response.headers['set-cookie']).toBeUndefined()
+  })
+
   it('rejects a JWT whose fully serialized session cookie exceeds 4096 bytes', async () => {
     const { app } = await setup()
     const largeJwt = rawJwt({
@@ -324,6 +335,34 @@ describe('session routes', () => {
     expect(response.statusCode).toBe(401)
     stableError(response, 'SESSION_INVALID')
     expectClearedSessionCookie(response.headers['set-cookie'])
+  })
+
+  it('denies /api/me after redemption access is revoked without clearing the cookie', async () => {
+    const { app, users } = await setup()
+    const cookie = await cookieFor(app)
+    users.currentProfile = { ...profile, allowed_groups: [] }
+
+    const response = await app.inject({ method: 'GET', url: '/api/me', headers: { cookie } })
+
+    expect(response.statusCode).toBe(403)
+    stableError(response, 'REDEEM_ACCESS_DENIED')
+    expect(response.headers['set-cookie']).toBeUndefined()
+  })
+
+  it('allows the same session cookie after redemption access is restored', async () => {
+    const { app, users } = await setup()
+    const cookie = await cookieFor(app)
+    users.currentProfile = { ...profile, allowed_groups: [] }
+
+    const denied = await app.inject({ method: 'GET', url: '/api/me', headers: { cookie } })
+    expect(denied.statusCode).toBe(403)
+    stableError(denied, 'REDEEM_ACCESS_DENIED')
+
+    users.currentProfile = { ...profile, allowed_groups: [24] }
+    const restored = await app.inject({ method: 'GET', url: '/api/me', headers: { cookie } })
+
+    expect(restored.statusCode).toBe(200)
+    expect(restored.json()).toEqual({ id: 7, username: 'alice', balance: '0' })
   })
 
   it.each([
@@ -493,6 +532,40 @@ describe('origin and schemas', () => {
 })
 
 describe('protected conversions', () => {
+  it('blocks prepare before conversion side effects after redemption access is revoked', async () => {
+    const { app, users, conversions } = await setup()
+    const cookie = await cookieFor(app)
+    users.currentProfile = { ...profile, allowed_groups: [] }
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/conversions/prepare',
+      headers: { origin: appOrigin, cookie },
+      payload: { operation_id: operationId, amount: '12.50', count: 1 },
+    })
+
+    expect(response.statusCode).toBe(403)
+    stableError(response, 'REDEEM_ACCESS_DENIED')
+    expect(conversions.prepareCalls).toEqual([])
+  })
+
+  it('blocks execute before conversion side effects after redemption access is revoked', async () => {
+    const { app, users, conversions } = await setup()
+    const cookie = await cookieFor(app)
+    users.currentProfile = { ...profile, allowed_groups: [] }
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/conversions/execute',
+      headers: { origin: appOrigin, cookie },
+      payload: { operation_token: 'signed-operation-token' },
+    })
+
+    expect(response.statusCode).toBe(403)
+    stableError(response, 'REDEEM_ACCESS_DENIED')
+    expect(conversions.executeCalls).toEqual([])
+  })
+
   it('prepares with the authenticated session JWT and user ID', async () => {
     const { app, conversions } = await setup()
     const userJwt = jwt()
