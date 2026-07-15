@@ -204,7 +204,8 @@ export function buildApp(
       config.upstreamTimeoutMs,
     )
   const conversions =
-    optionalDependencies.conversions ?? new ConversionService(users, admin, secrets)
+    optionalDependencies.conversions ??
+    new ConversionService(users, admin, secrets, config.redeemAllowedGroupId)
   const serveWeb = config.nodeEnv === 'production'
   const webRoot =
     optionalDependencies.webRoot ?? resolve(fileURLToPath(new URL('../web', import.meta.url)))

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { ExecuteResponse } from '../../src/shared/contracts.js'
+import { KeyedMutex } from '../../src/server/conversion/keyed-mutex.js'
 import { ConversionService } from '../../src/server/conversion/service.js'
 import { AppError } from '../../src/server/errors.js'
 import { SecretsService, type OperationPayload } from '../../src/server/security/secrets.js'
@@ -24,6 +25,18 @@ function deferred<T = void>(): {
     resolve = done
   })
   return { promise, resolve }
+}
+
+class ObservableKeyedMutex extends KeyedMutex<number> {
+  readonly secondQueued = deferred()
+  #runCount = 0
+
+  override run<T>(key: number, work: () => Promise<T>): Promise<T> {
+    const result = super.run(key, work)
+    this.#runCount += 1
+    if (this.#runCount === 2) this.secondQueued.resolve()
+    return result
+  }
 }
 
 async function resolvesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
@@ -189,7 +202,7 @@ function upstream(kind: UpstreamErrorKind, status?: number): UpstreamError {
   return new UpstreamError(kind, `upstream ${kind}`, status === undefined ? {} : { status })
 }
 
-function setup(): {
+function setup(mutex: KeyedMutex<number> = new KeyedMutex<number>()): {
   service: TestConversionService
   users: FakeUserClient
   admin: FakeAdminClient
@@ -199,7 +212,7 @@ function setup(): {
   const admin = new FakeAdminClient()
   const secrets = new FakeSecrets()
   return {
-    service: new TestConversionService(users, admin, secrets),
+    service: new TestConversionService(users, admin, secrets, 24, mutex),
     users,
     admin,
     secrets,
@@ -269,6 +282,18 @@ describe('ConversionService.prepare', () => {
       'SESSION_INVALID',
     )
     expect(secrets.signed).toEqual([])
+  })
+
+  it('rejects a user without redemption access before signing', async () => {
+    const { service, users, admin, secrets } = setup()
+    users.profile = { ...users.profile, allowed_groups: [] }
+
+    await expectAppError(
+      () => service.prepare('user-jwt', userId, operationId, '10', 1),
+      'REDEEM_ACCESS_DENIED',
+    )
+    expect(secrets.signed).toEqual([])
+    expect(admin.calls).toEqual([])
   })
 
   it('rejects a batch total above the live balance without generating a token', async () => {
@@ -575,7 +600,7 @@ describe('ConversionService.execute', () => {
     }
     const users = new FakeUserClient()
     const admin = new FakeAdminClient()
-    const service = new ConversionService(users, admin, verifyingSecrets)
+    const service = new ConversionService(users, admin, verifyingSecrets, 24)
     const firstEntered = deferred()
     const firstRelease = deferred()
     admin.generateHooks.set(operationId, async () => {
@@ -598,6 +623,41 @@ describe('ConversionService.execute', () => {
     expect(admin.calls.some(([name, key]) => (
       name === 'generate' && key === secondOperationId
     ))).toBe(false)
+  })
+
+  it('rechecks redemption access after waiting for the per-user lock', async () => {
+    const mutex = new ObservableKeyedMutex()
+    const { service, users, admin, secrets } = setup(mutex)
+    const firstEntered = deferred()
+    const firstRelease = deferred()
+    secrets.verifyOperation = async (token) => {
+      if (token === 'second-token') {
+        return { ...secrets.payload, operationId: secondOperationId }
+      }
+      return secrets.payload
+    }
+    admin.generateHooks.set(operationId, async () => {
+      firstEntered.resolve()
+      await firstRelease.promise
+    })
+
+    const first = service.execute('first-token', 'user-jwt', userId)
+    await firstEntered.promise
+    const second = service.execute('second-token', 'user-jwt', userId)
+    const secondExpectation = expectAppError(() => second, 'REDEEM_ACCESS_DENIED')
+    await mutex.secondQueued.promise
+    users.profile = { ...users.profile, allowed_groups: [] }
+    firstRelease.resolve()
+
+    await expect(first).resolves.toMatchObject({
+      status: 'completed',
+      operation_id: operationId,
+    })
+    await secondExpectation
+    expect(admin.calls).toEqual([
+      ['generate', operationId, 10, 1],
+      ['debit', userId, operationId, 10],
+    ])
   })
 
   it('serializes different operations for the same user', async () => {

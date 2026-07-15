@@ -798,8 +798,8 @@ describe('security headers, rate limits, and logging', () => {
   it.each([
     ['prepare', { operation_id: operationId, amount: '1', count: 1 }],
     ['execute', { operation_token: 'operation-token' }],
-  ] as const)('applies the %s user limit before upstream profile revalidation', async (route, payload) => {
-    const { app, users } = await setup()
+  ] as const)('revalidates %s access before applying its user limit', async (route, payload) => {
+    const { app, users, conversions } = await setup()
     const cookie = await cookieFor(app)
     users.calls = []
     const send = () => app.inject({
@@ -814,11 +814,16 @@ describe('security headers, rate limits, and logging', () => {
     }
     expect(users.calls).toHaveLength(10)
 
-    const limited = await send()
-    expect(limited.statusCode).toBe(429)
-    stableError(limited, 'RATE_LIMITED')
-    expect(limited.headers['retry-after']).toBeDefined()
-    expect(users.calls).toHaveLength(10)
+    const conversionCallCount = conversions.prepareCalls.length + conversions.executeCalls.length
+    users.currentProfile = { ...profile, allowed_groups: [] }
+
+    const denied = await send()
+    expect(denied.statusCode).toBe(403)
+    stableError(denied, 'REDEEM_ACCESS_DENIED')
+    expect(users.calls).toHaveLength(11)
+    expect(conversions.prepareCalls.length + conversions.executeCalls.length).toBe(
+      conversionCallCount,
+    )
   })
 
   it('applies independent route IP limits before reading a protected session', async () => {
