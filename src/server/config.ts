@@ -13,6 +13,12 @@ const integerEnv = (defaultValue: number, minimum: number, maximum: number) =>
       .pipe(z.number().int().min(minimum).max(maximum)),
   )
 
+const requiredPositiveIntegerEnv = z
+  .string()
+  .regex(/^[1-9]\d*$/)
+  .transform(Number)
+  .pipe(z.number().int().positive().max(Number.MAX_SAFE_INTEGER))
+
 const booleanEnv = (defaultValue: boolean) =>
   z.preprocess(
     (value) => value ?? String(defaultValue),
@@ -76,6 +82,7 @@ const envSchema = z.object({
   NODE_ENV: z.enum(nodeEnvironments).default('development'),
   SUB2API_BASE_URL: baseUrlSchema,
   SUB2API_ADMIN_API_KEY: z.string().startsWith('admin-'),
+  REDEEM_ALLOWED_GROUP_ID: requiredPositiveIntegerEnv,
   APP_ORIGIN: originSchema,
   SUB2API_ORIGIN: originSchema,
   SESSION_SECRET: secretSchema,
@@ -93,6 +100,7 @@ export interface AppConfig {
   port: number
   sub2apiBaseUrl: string
   sub2apiAdminApiKey: string
+  redeemAllowedGroupId: number
   appOrigin: string
   sub2apiOrigin: string
   sessionSecret: string
@@ -126,6 +134,7 @@ export function loadConfig(input: NodeJS.ProcessEnv): Readonly<AppConfig> {
     port: env.PORT,
     sub2apiBaseUrl: env.SUB2API_BASE_URL,
     sub2apiAdminApiKey: env.SUB2API_ADMIN_API_KEY,
+    redeemAllowedGroupId: env.REDEEM_ALLOWED_GROUP_ID,
     appOrigin: env.APP_ORIGIN,
     sub2apiOrigin: env.SUB2API_ORIGIN,
     sessionSecret: env.SESSION_SECRET,

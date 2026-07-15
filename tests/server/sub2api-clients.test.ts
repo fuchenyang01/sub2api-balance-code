@@ -15,6 +15,7 @@ const profile = {
   username: 'alice',
   balance: 42.5,
   status: 'active',
+  allowed_groups: [24, 30],
   ignored: 'extra-field',
 }
 
@@ -96,6 +97,7 @@ describe('sub2api clients', () => {
       username: 'alice',
       balance: 42.5,
       status: 'active',
+      allowed_groups: [24, 30],
     })
   })
 

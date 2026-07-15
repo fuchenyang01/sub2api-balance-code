@@ -7,6 +7,7 @@ import { loadConfig } from '../../src/server/config.js'
 const requiredEnv = {
   SUB2API_BASE_URL: 'https://api.example.com/v1/',
   SUB2API_ADMIN_API_KEY: 'admin-test-key',
+  REDEEM_ALLOWED_GROUP_ID: '24',
   APP_ORIGIN: 'https://app.example.com',
   SUB2API_ORIGIN: 'https://api.example.com',
   SESSION_SECRET: 'session-secret-that-is-at-least-32-bytes',
@@ -43,6 +44,7 @@ describe('loadConfig', () => {
       'OPERATION_SIGNING_SECRET',
       'OPERATION_TTL_MINUTES',
       'PORT',
+      'REDEEM_ALLOWED_GROUP_ID',
       'SESSION_SECRET',
       'SUB2API_ADMIN_API_KEY',
       'SUB2API_BASE_URL',
@@ -85,6 +87,7 @@ describe('loadConfig', () => {
       port: 8080,
       sub2apiBaseUrl: 'https://api.example.com/v1',
       sub2apiAdminApiKey: 'admin-test-key',
+      redeemAllowedGroupId: 24,
       appOrigin: 'https://app.example.com',
       sub2apiOrigin: 'https://api.example.com',
       sessionSecret: 'session-secret-that-is-at-least-32-bytes',
@@ -127,6 +130,13 @@ describe('loadConfig', () => {
   ])('rejects out-of-range numeric %s=%s', (key, value) => {
     expect(() => loadConfig(env({ [key]: value }))).toThrow()
   })
+
+  it.each(['', '#24', '0', '-1', '1.5', 'abc', '9007199254740992'])(
+    'rejects invalid REDEEM_ALLOWED_GROUP_ID=%s',
+    (value) => {
+      expect(() => loadConfig(env({ REDEEM_ALLOWED_GROUP_ID: value }))).toThrow()
+    },
+  )
 
   it.each([
     ['TRUST_PROXY', '1'],
