@@ -82,7 +82,7 @@
 9. 工具使用只保存在服务端的管理员 API Key，一次请求生成整批兑换码，再用一次请求从已经验证的用户 ID 扣减总额。
 10. 页面一次显示整批兑换码，并重新查询一次实时余额。
 
-后续的 `/api/me`、准备兑换和执行兑换都会重新向 sub2api 验证用户状态和专属分组。浏览器提交的用户名、用户 ID、余额或分组都不会被当作可信数据。
+前端隐藏不是安全边界。后续的 `/api/me`、准备兑换和执行兑换都是受保护请求，服务端会在每次受保护请求中重新向 sub2api 验证用户状态和专属分组。浏览器提交的用户名、用户 ID、余额或分组都不会被当作可信数据。
 
 ## 批量生成怎么用
 
@@ -155,12 +155,12 @@ sub2api: https://sub.example.com
 | 教程中的示例 | 含义 | 部署时替换成 |
 | --- | --- | --- |
 | `203.0.113.10` | 云服务器公网 IPv4 | 你的服务器公网 IP |
-| `sub.example.com` | 现有 sub2api 地址 | 你的 sub2api 域名 |
-| `code.example.com` | 本工具地址 | 与 sub2api 同主域的子域 |
+| `sub.example.com` | 现有 sub2api 地址 | 你的 sub2api 域名，例如 `www.cyapi.cyou` |
+| `code.example.com` | 本工具地址 | 与 sub2api 同主域的子域，例如 `code.cyapi.cyou` |
 | `admin@example.com` | 证书通知邮箱 | 你的真实邮箱 |
 
 > [!IMPORTANT]
-> 如果要使用 iframe，两个地址必须使用 HTTPS，并且共享同一个可注册主域。例如 `sub.example.com` 和 `code.example.com` 可以；`sub.example.com` 和 `localhost` 不可以。
+> 如果要使用 iframe，两个地址必须使用 HTTPS，并且共享同一个可注册主域。例如 `www.cyapi.cyou` 和 `code.cyapi.cyou` 可以；`www.cyapi.cyou` 和 `localhost` 不可以。
 
 ### 第 1 步：解析工具域名
 
@@ -258,7 +258,7 @@ fi
 2. 进入“分组管理”，创建名为“分销代理”的分组，或打开已有的同名分组。
 3. 确认分组处于启用状态，并且类型是“专属分组”。公开分组不适合作为兑换权限区分，必须使用专属分组。
 4. 在分组列表右上角打开“列设置”，勾选显示 `ID` 列。
-5. 记下“分销代理”的数字 ID。本教程假设列表显示 `#24`，后面配置值就是 `24`。
+5. 记下“分销代理”的数字 ID。本教程假设列表显示 `#24`：`#24` 对应配置值 `24`。
 
 #### 4.2 把目标用户加入专属分组
 
@@ -736,7 +736,7 @@ curl -I https://code.example.com/
 这是典型的跨站 Cookie 问题。例如：
 
 ```text
-sub2api: https://sub.example.com
+sub2api: https://www.cyapi.cyou
 工具:    http://localhost:5173
 ```
 
@@ -745,8 +745,8 @@ sub2api: https://sub.example.com
 生产解决方法是使用同站点 HTTPS 子域：
 
 ```text
-sub2api: https://sub.example.com
-工具:    https://code.example.com
+sub2api: https://www.cyapi.cyou
+工具:    https://code.cyapi.cyou
 ```
 
 不要把 Cookie 改成 `SameSite=None` 作为长期方案，现代浏览器仍可能拦截第三方 Cookie。

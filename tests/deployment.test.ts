@@ -30,20 +30,26 @@ describe('deployment contracts', () => {
 
   it('documents dedicated redemption group setup in sub2api', () => {
     const readme = repositoryFile('README.md')
+    const workflow = sectionBetween(
+      readme,
+      '## 它是怎样工作的',
+      '## 批量生成怎么用',
+    )
     const setup = sectionBetween(
       readme,
       '#### 4.1 创建允许兑换的专属分组',
       '### 第 5 步：下载项目',
     )
 
-    expect(readme).toContain('服务端会在每次受保护请求中重新验证')
+    expect(workflow).toContain('前端隐藏不是安全边界')
+    expect(workflow).toContain('每次受保护请求')
     expect(setup).toContain('登录 sub2api 管理后台')
     expect(setup).toContain('分组管理')
     expect(setup).toContain('分销代理')
     expect(setup).toMatch(/启用状态.*专属分组/)
     expect(setup).toMatch(/公开分组.*不适合.*权限.*专属分组/)
     expect(setup).toContain('列设置')
-    expect(setup).toContain('`#24`')
+    expect(setup).toContain('`#24` 对应配置值 `24`')
     expect(setup).toContain('用户管理')
     expect(setup).toContain('分组配置')
     expect(setup).toContain('勾选“分销代理”专属分组')
@@ -61,6 +67,11 @@ describe('deployment contracts', () => {
       '本地 `.env` 示例：',
       '开发模式下 Vite',
     )
+    const reference = sectionBetween(
+      readme,
+      '## 环境变量参考',
+      '## 本地开发',
+    )
 
     expect(production).toMatch(
       /SUB2API_ADMIN_API_KEY=REPLACE_ME_ADMIN_KEY\r?\nREDEEM_ALLOWED_GROUP_ID=24/,
@@ -70,9 +81,10 @@ describe('deployment contracts', () => {
     )
     expect(production).toContain('`#24` 对应填写 `24`，不要填写 `#24`')
     expect(production).toContain('修改 `.env` 后必须删除并重建容器')
-    expect(readme).toMatch(
+    expect(reference).toMatch(
       /^\| `REDEEM_ALLOWED_GROUP_ID` \| 无，必填 \|.*正整数.*只填数字.*24.*\|$/m,
     )
+    expect(reference).toContain('只填数字不带 `#`')
   })
 
   it('documents access denial troubleshooting and custom menu limits', () => {
@@ -91,6 +103,7 @@ describe('deployment contracts', () => {
     expect(menu).toMatch(/自定义菜单.*普通用户可见.*管理员可见/)
     expect(menu).toContain('不能按专属分组隐藏')
     expect(menu).toContain('未授权用户也可能看见入口')
+    expect(menu).toContain('后端仍会返回 HTTP 403')
     expect(menu).toContain('本工具不修改 sub2api')
     expect(troubleshooting).toContain('HTTP 403')
     expect(troubleshooting).toContain('`REDEEM_ACCESS_DENIED`')
@@ -103,9 +116,25 @@ describe('deployment contracts', () => {
     expect(troubleshooting).toMatch(
       /重新加入并保存分组后.*点击“重新检查”/,
     )
-    expect(readme).not.toContain('cyapi.cyou')
     expect(readme).not.toMatch(/SUB2API_ADMIN_API_KEY=admin-[^\s]+/)
     expect(readme).not.toMatch(/[?&]token=(?!\.\.\.)[A-Za-z0-9_-]{16,}/)
+  })
+
+  it('keeps the concrete public deployment domain examples', () => {
+    const readme = repositoryFile('README.md')
+    const prerequisites = sectionBetween(
+      readme,
+      '### 第 0 步：准备服务器、域名和权限',
+      '### 第 1 步：解析工具域名',
+    )
+    const iframeTroubleshooting = sectionBetween(
+      readme,
+      '### iframe 显示“会话失效”，但新窗口可以使用',
+      '### 页面显示需要登录或返回 401',
+    )
+
+    expect(prerequisites.match(/cyapi\.cyou/g)).toHaveLength(5)
+    expect(iframeTroubleshooting.match(/cyapi\.cyou/g)).toHaveLength(3)
   })
 
   it('loads the local server environment from .env in the dev command', () => {
