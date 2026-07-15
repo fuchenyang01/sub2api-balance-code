@@ -328,7 +328,7 @@ describe('session routes', () => {
   it('rejects a profile ID mismatch and clears the cookie', async () => {
     const { app, users } = await setup()
     const cookie = await cookieFor(app)
-    users.currentProfile = { ...profile, id: 8 }
+    users.currentProfile = { ...profile, id: 8, allowed_groups: [] }
 
     const response = await app.inject({ method: 'GET', url: '/api/me', headers: { cookie } })
 
