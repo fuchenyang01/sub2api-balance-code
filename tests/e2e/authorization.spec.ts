@@ -6,6 +6,7 @@ import { expect, test } from './fixtures/test-server.js'
 
 test.describe('redemption group authorization', () => {
   test('allows a denied first visit after group membership is granted', async ({ page, environment }) => {
+    const errors = collectBrowserErrors(page, { ignoreExpectedAuthorization403: true })
     environment.mock.setAllowedGroups([])
 
     await page.goto(environment.authenticatedUrl())
@@ -15,7 +16,6 @@ test.describe('redemption group authorization', () => {
     expect(environment.mock.totalGenerateRequests()).toBe(0)
     expect(environment.mock.totalDebitRequests()).toBe(0)
 
-    const errors = collectBrowserErrors(page)
     environment.mock.setAllowedGroups([24])
     await page.getByTestId('retry-access').click()
 
@@ -28,6 +28,7 @@ test.describe('redemption group authorization', () => {
     page,
     environment,
   }) => {
+    const errors = collectBrowserErrors(page, { ignoreExpectedAuthorization403: true })
     await page.goto(environment.authenticatedUrl())
     await expect(page.getByText('测试用户')).toBeVisible()
 
@@ -39,7 +40,6 @@ test.describe('redemption group authorization', () => {
     expect(environment.mock.totalGenerateRequests()).toBe(0)
     expect(environment.mock.totalDebitRequests()).toBe(0)
 
-    const errors = collectBrowserErrors(page)
     environment.mock.setAllowedGroups([24])
     await page.getByTestId('retry-access').click()
 

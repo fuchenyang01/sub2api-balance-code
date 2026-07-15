@@ -68,13 +68,13 @@ test('copies a completed code without clipboard-write delegation from the parent
 })
 
 test('restores iframe access after group membership is granted', async ({ page, environment }) => {
+  const errors = collectBrowserErrors(page, { ignoreExpectedAuthorization403: true })
   environment.mock.setAllowedGroups([])
 
   await page.goto(environment.iframeParentUrl())
 
   const tool = page.frameLocator('#tool-frame')
   await expect(tool.getByRole('heading', { name: '暂无余额兑换权限' })).toBeVisible()
-  const errors = collectBrowserErrors(page)
   await expect(tool.getByLabel('兑换金额')).toHaveCount(0)
   expect(environment.mock.totalGenerateRequests()).toBe(0)
   expect(environment.mock.totalDebitRequests()).toBe(0)
@@ -82,6 +82,7 @@ test('restores iframe access after group membership is granted', async ({ page, 
   const frame = page.frames().find((candidate: Frame) => candidate !== page.mainFrame())
   expect(frame).toBeDefined()
   expect(new URL(frame!.url()).searchParams.has('token')).toBe(false)
+  expect(new URL(frame!.url()).searchParams.has('user_id')).toBe(false)
 
   environment.mock.setAllowedGroups([24])
   await tool.getByTestId('retry-access').click()
@@ -89,6 +90,7 @@ test('restores iframe access after group membership is granted', async ({ page, 
   await expect(tool.getByText('测试用户')).toBeVisible()
   await expect(tool.getByLabel('兑换金额')).toBeVisible()
   expect(new URL(frame!.url()).searchParams.has('token')).toBe(false)
+  expect(new URL(frame!.url()).searchParams.has('user_id')).toBe(false)
   expect(environment.mock.totalGenerateRequests()).toBe(0)
   expect(environment.mock.totalDebitRequests()).toBe(0)
   expectNoBrowserErrors(errors)

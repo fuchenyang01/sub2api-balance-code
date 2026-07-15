@@ -3,16 +3,84 @@ import type { ConsoleMessage, Locator, Page } from '@playwright/test'
 import { expect } from './test-server.js'
 
 export interface BrowserErrors {
-  consoleErrors: string[]
+  consoleErrors: BrowserConsoleError[]
+  pageErrors: string[]
+  responses: BrowserResponse[]
+  ignoreExpectedAuthorization403: boolean
+}
+
+export interface BrowserConsoleError {
+  text: string
+  url: string
+}
+
+export interface BrowserResponse {
+  method: string
+  url: string
+  status: number
+}
+
+export interface CollectBrowserErrorsOptions {
+  ignoreExpectedAuthorization403?: boolean
+}
+
+interface UnexpectedBrowserErrors {
+  consoleErrors: BrowserConsoleError[]
   pageErrors: string[]
 }
 
-export function collectBrowserErrors(page: Page): BrowserErrors {
-  const errors: BrowserErrors = { consoleErrors: [], pageErrors: [] }
+const CHROMIUM_FORBIDDEN_RESOURCE_ERROR = 'Failed to load resource: the server responded with a status of 403 (Forbidden)'
+
+function isExpectedAuthorizationResponse(response: BrowserResponse): boolean {
+  if (response.status !== 403) return false
+  const path = new URL(response.url).pathname
+  return (response.method === 'POST' && path === '/api/session/exchange')
+    || (response.method === 'GET' && path === '/api/me')
+}
+
+export function unexpectedBrowserErrors(errors: BrowserErrors): UnexpectedBrowserErrors {
+  if (!errors.ignoreExpectedAuthorization403) {
+    return { consoleErrors: errors.consoleErrors, pageErrors: errors.pageErrors }
+  }
+
+  const expectedResponses = new Map<string, number>()
+  for (const response of errors.responses) {
+    if (!isExpectedAuthorizationResponse(response)) continue
+    expectedResponses.set(response.url, (expectedResponses.get(response.url) ?? 0) + 1)
+  }
+  const consoleErrors = errors.consoleErrors.filter((error) => {
+    if (error.text !== CHROMIUM_FORBIDDEN_RESOURCE_ERROR) return true
+    const available = expectedResponses.get(error.url) ?? 0
+    if (available === 0) return true
+    expectedResponses.set(error.url, available - 1)
+    return false
+  })
+  return { consoleErrors, pageErrors: errors.pageErrors }
+}
+
+export function collectBrowserErrors(
+  page: Page,
+  options: CollectBrowserErrorsOptions = {},
+): BrowserErrors {
+  const errors: BrowserErrors = {
+    consoleErrors: [],
+    pageErrors: [],
+    responses: [],
+    ignoreExpectedAuthorization403: options.ignoreExpectedAuthorization403 ?? false,
+  }
   page.on('console', (message: ConsoleMessage) => {
-    if (message.type() === 'error') errors.consoleErrors.push(message.text())
+    if (message.type() === 'error') {
+      errors.consoleErrors.push({ text: message.text(), url: message.location().url })
+    }
   })
   page.on('pageerror', (error) => errors.pageErrors.push(error.message))
+  page.on('response', (response) => {
+    errors.responses.push({
+      method: response.request().method(),
+      url: response.url(),
+      status: response.status(),
+    })
+  })
   return errors
 }
 
@@ -59,6 +127,7 @@ export async function completeConversion(page: Page): Promise<void> {
 }
 
 export function expectNoBrowserErrors(errors: BrowserErrors): void {
-  expect(errors.pageErrors).toEqual([])
-  expect(errors.consoleErrors).toEqual([])
+  const unexpected = unexpectedBrowserErrors(errors)
+  expect(unexpected.pageErrors).toEqual([])
+  expect(unexpected.consoleErrors).toEqual([])
 }

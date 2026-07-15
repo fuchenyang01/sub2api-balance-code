@@ -31,12 +31,12 @@ test('keeps the denied access state readable without horizontal overflow', async
   page,
   environment,
 }, testInfo) => {
+  const errors = collectBrowserErrors(page, { ignoreExpectedAuthorization403: true })
   environment.mock.setAllowedGroups([])
 
   await page.goto(environment.authenticatedUrl())
 
   await expect(page.getByRole('heading', { name: '暂无余额兑换权限' })).toBeVisible()
-  const errors = collectBrowserErrors(page)
   await expect(page.getByText('重新检查', { exact: true })).toBeVisible()
   await expect(page.getByLabel('兑换金额')).toHaveCount(0)
   const overflow = await page.evaluate(() => ({
