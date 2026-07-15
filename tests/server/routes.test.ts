@@ -27,6 +27,7 @@ const config: Readonly<AppConfig> = Object.freeze({
   port: 3000,
   sub2apiBaseUrl: 'https://api.example.test',
   sub2apiAdminApiKey: 'admin-SECRET-KEY',
+  redeemAllowedGroupId: 24,
   appOrigin,
   sub2apiOrigin,
   sessionSecret,
@@ -43,6 +44,7 @@ const profile: Profile = {
   username: 'alice',
   balance: 0,
   status: 'active',
+  allowed_groups: [24],
 }
 
 function rawJwt(payload: Record<string, unknown>): string {

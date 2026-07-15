@@ -11,10 +11,12 @@ const baseProfile = {
 
 describe('profileSchema', () => {
   it('preserves valid allowed groups', () => {
-    expect(profileSchema.parse({ ...baseProfile, allowed_groups: [24, 30] }).allowed_groups).toEqual([
-      24,
-      30,
-    ])
+    expect(
+      profileSchema.parse({
+        ...baseProfile,
+        allowed_groups: [24, 30, Number.MAX_SAFE_INTEGER],
+      }).allowed_groups,
+    ).toEqual([24, 30, Number.MAX_SAFE_INTEGER])
   })
 
   it('normalizes a missing allowed groups field to an empty array', () => {
@@ -28,6 +30,7 @@ describe('profileSchema', () => {
     [24, 0],
     [24, 1.5],
     [24, '30'],
+    [24, Number.MAX_SAFE_INTEGER + 1],
   ])('normalizes invalid allowed groups %# to an empty array', (allowed_groups) => {
     expect(profileSchema.parse({ ...baseProfile, allowed_groups }).allowed_groups).toEqual([])
   })
