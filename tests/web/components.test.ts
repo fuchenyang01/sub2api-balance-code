@@ -14,6 +14,7 @@ const styles = readFileSync(join(process.cwd(), 'src/web/styles.css'), 'utf8')
 
 const appController = vi.hoisted((): {
   session: string
+  sessionRef: null | { value: string }
   profile: null | { id: number; username: string; balance: string }
   error: null | { code: string; message: string; requestId: string; retryable: boolean }
   convert: ReturnType<typeof vi.fn>
@@ -27,6 +28,7 @@ const appController = vi.hoisted((): {
   storageReady: boolean
 } => ({
   session: 'authenticated',
+  sessionRef: null,
   profile: { id: 7, username: 'alice', balance: '10' },
   error: null,
   convert: vi.fn(),
@@ -51,24 +53,28 @@ vi.mock('../../src/web/composables/useConversion.js', async (importOriginal) => 
   const actual = await importOriginal<typeof import('../../src/web/composables/useConversion.js')>()
   return {
     ...actual,
-    useConversion: () => ({
-      session: ref(appController.session),
-      profile: ref(appController.profile),
-      result: ref(appController.result),
-      pending: ref(null),
-      pendingOperation: ref(appController.pendingOperation),
-      history: ref(appController.history),
-      error: ref(appController.error),
-      loading: ref(false),
-      busy: ref(false),
-      storageReady: ref(appController.storageReady),
-      initialize: appController.initialize,
-      refresh: appController.refresh,
-      logout: vi.fn(),
-      convert: appController.convert,
-      resumePending: appController.resumePending,
-      clearHistory: appController.clearHistory,
-    }),
+    useConversion: () => {
+      const session = ref(appController.session)
+      appController.sessionRef = session
+      return {
+        session,
+        profile: ref(appController.profile),
+        result: ref(appController.result),
+        pending: ref(null),
+        pendingOperation: ref(appController.pendingOperation),
+        history: ref(appController.history),
+        error: ref(appController.error),
+        loading: ref(false),
+        busy: ref(false),
+        storageReady: ref(appController.storageReady),
+        initialize: appController.initialize,
+        refresh: appController.refresh,
+        logout: vi.fn(),
+        convert: appController.convert,
+        resumePending: appController.resumePending,
+        clearHistory: appController.clearHistory,
+      }
+    },
   }
 })
 
@@ -82,6 +88,7 @@ import PendingOperation from '../../src/web/components/PendingOperation.vue'
 
 beforeEach(() => {
   appController.session = 'authenticated'
+  appController.sessionRef = null
   appController.profile = { id: 7, username: 'alice', balance: '10' }
   appController.error = null
   appController.pendingOperation = null
@@ -446,6 +453,19 @@ describe('App', () => {
 
     expect(wrapper.find('[role="dialog"]').exists()).toBe(true)
     expect(appController.convert).not.toHaveBeenCalled()
+  })
+
+  it('hides an open confirmation dialog when the session becomes unauthorized', async () => {
+    const wrapper = mount(App)
+    await wrapper.get('[aria-label="兑换金额"]').setValue('1')
+    await wrapper.get('form').trigger('submit')
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(true)
+
+    appController.sessionRef!.value = 'unauthorized'
+    await nextTick()
+
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('暂无余额兑换权限')
   })
 
   it('renders a retryable service error separately from an expired session', async () => {

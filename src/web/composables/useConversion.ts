@@ -331,7 +331,7 @@ export function createUseConversion(
       pendingExchangeToken = null
       session.value = 'expired'
       profile.value = null
-    } else if (session.value === 'loading') {
+    } else if (session.value === 'loading' || session.value === 'unauthorized') {
       session.value = 'error'
     }
     if (!safetyFailureActive) error.value = safeError
