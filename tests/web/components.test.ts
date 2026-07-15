@@ -15,6 +15,8 @@ const styles = readFileSync(join(process.cwd(), 'src/web/styles.css'), 'utf8')
 const appController = vi.hoisted((): {
   session: string
   sessionRef: null | { value: string }
+  busy: boolean
+  busyRef: null | { value: boolean }
   profile: null | { id: number; username: string; balance: string }
   error: null | { code: string; message: string; requestId: string; retryable: boolean }
   convert: ReturnType<typeof vi.fn>
@@ -29,6 +31,8 @@ const appController = vi.hoisted((): {
 } => ({
   session: 'authenticated',
   sessionRef: null,
+  busy: false,
+  busyRef: null,
   profile: { id: 7, username: 'alice', balance: '10' },
   error: null,
   convert: vi.fn(),
@@ -55,7 +59,9 @@ vi.mock('../../src/web/composables/useConversion.js', async (importOriginal) => 
     ...actual,
     useConversion: () => {
       const session = ref(appController.session)
+      const busy = ref(appController.busy)
       appController.sessionRef = session
+      appController.busyRef = busy
       return {
         session,
         profile: ref(appController.profile),
@@ -65,7 +71,7 @@ vi.mock('../../src/web/composables/useConversion.js', async (importOriginal) => 
         history: ref(appController.history),
         error: ref(appController.error),
         loading: ref(false),
-        busy: ref(false),
+        busy,
         storageReady: ref(appController.storageReady),
         initialize: appController.initialize,
         refresh: appController.refresh,
@@ -89,6 +95,8 @@ import PendingOperation from '../../src/web/components/PendingOperation.vue'
 beforeEach(() => {
   appController.session = 'authenticated'
   appController.sessionRef = null
+  appController.busy = false
+  appController.busyRef = null
   appController.profile = { id: 7, username: 'alice', balance: '10' }
   appController.error = null
   appController.pendingOperation = null
@@ -455,7 +463,7 @@ describe('App', () => {
     expect(appController.convert).not.toHaveBeenCalled()
   })
 
-  it('hides an open confirmation dialog when the session becomes unauthorized', async () => {
+  it('clears an open confirmation when access is lost so it stays closed after reauthorization', async () => {
     const wrapper = mount(App)
     await wrapper.get('[aria-label="兑换金额"]').setValue('1')
     await wrapper.get('form').trigger('submit')
@@ -466,6 +474,11 @@ describe('App', () => {
 
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
     expect(wrapper.text()).toContain('暂无余额兑换权限')
+
+    appController.sessionRef!.value = 'authenticated'
+    await nextTick()
+
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
   })
 
   it('renders a retryable service error separately from an expired session', async () => {
@@ -525,6 +538,23 @@ describe('App', () => {
 
     await wrapper.get('[data-testid="retry-access"]').trigger('click')
     expect(appController.refresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('exposes busy state while redemption access is being checked', async () => {
+    appController.session = 'unauthorized'
+    appController.profile = null
+    const wrapper = mount(App)
+    const retry = wrapper.get('[data-testid="retry-access"]')
+
+    expect(retry.attributes('aria-busy')).toBe('false')
+    expect(retry.text()).toBe('重新检查')
+
+    appController.busyRef!.value = true
+    await nextTick()
+
+    expect(retry.attributes('aria-busy')).toBe('true')
+    expect(retry.attributes('disabled')).toBeDefined()
+    expect(retry.text()).toBe('正在检查')
   })
 
   it('shows stored recovery metadata without its token and hiding lasts only for the current mount', async () => {

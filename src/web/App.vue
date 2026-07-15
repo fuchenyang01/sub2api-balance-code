@@ -39,6 +39,10 @@ watch(
   },
 )
 
+watch(authenticated, (value) => {
+  if (!value) confirmation.value = null
+})
+
 onMounted(() => {
   void conversion.initialize()
 })
@@ -101,9 +105,10 @@ onMounted(() => {
             class="secondary-button session-retry"
             data-testid="retry-access"
             :disabled="conversion.busy.value"
+            :aria-busy="conversion.busy.value"
             @click="conversion.refresh"
           >
-            重新检查
+            {{ conversion.busy.value ? '正在检查' : '重新检查' }}
           </button>
         </div>
       </section>
