@@ -62,7 +62,13 @@ function codes(count: number, value: number): RedeemCode[] {
 }
 
 class FakeUserClient implements UserClient {
-  profile = { id: userId, username: 'alice', balance: 100, status: 'active' }
+  profile = {
+    id: userId,
+    username: 'alice',
+    balance: 100,
+    status: 'active',
+    allowed_groups: [24],
+  }
   calls: string[] = []
   error: unknown
 
