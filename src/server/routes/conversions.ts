@@ -92,8 +92,8 @@ export function registerConversionRoutes(
       preHandler: [
         prepareIpLimit,
         sessions.loadIdentity,
-        prepareLimit,
         sessions.revalidate,
+        prepareLimit,
       ],
     },
     async (request) => {
@@ -115,8 +115,8 @@ export function registerConversionRoutes(
       preHandler: [
         executeIpLimit,
         sessions.loadIdentity,
-        executeLimit,
         sessions.revalidate,
+        executeLimit,
       ],
     },
     async (request, reply) => {

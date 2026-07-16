@@ -5,6 +5,16 @@ import { describe, expect, it } from 'vitest'
 const repositoryFile = (name: string): string =>
   readFileSync(new URL(`../${name}`, import.meta.url), 'utf8')
 
+const sectionBetween = (content: string, start: string, end: string): string => {
+  const startIndex = content.indexOf(start)
+  const endIndex = content.indexOf(end, startIndex + start.length)
+
+  expect(startIndex).toBeGreaterThanOrEqual(0)
+  expect(endIndex).toBeGreaterThan(startIndex)
+
+  return content.slice(startIndex, endIndex)
+}
+
 describe('deployment contracts', () => {
   it('checks container health on the configured application port', () => {
     expect(repositoryFile('Dockerfile')).toMatch(
@@ -16,6 +26,167 @@ describe('deployment contracts', () => {
     const readme = repositoryFile('README.md')
     expect(readme).toContain('PORT=4000')
     expect(readme).toContain('-p 127.0.0.1:3100:4000')
+  })
+
+  it('documents dedicated redemption group setup in sub2api', () => {
+    const readme = repositoryFile('README.md')
+    const workflow = sectionBetween(
+      readme,
+      '## 它是怎样工作的',
+      '## 批量生成怎么用',
+    )
+    const setup = sectionBetween(
+      readme,
+      '#### 4.1 创建允许兑换的专属分组',
+      '### 第 5 步：下载项目',
+    )
+
+    expect(workflow).toContain('前端隐藏不是安全边界')
+    expect(workflow).toContain('每次受保护请求')
+    expect(workflow).toContain('实时 profile 的 `allowed_groups`')
+    expect(workflow).toContain('是否包含 `.env` 中配置的分组 ID')
+    expect(workflow).toContain('工具无法确认该分组是否为“启用”或“专属”')
+    expect(workflow).toContain('管理员必须在 sub2api 后台保证')
+    expect(setup).toContain('登录 sub2api 管理后台')
+    expect(setup).toContain('分组管理')
+    expect(setup).toContain('分销代理')
+    expect(setup).toMatch(/启用状态.*专属分组/)
+    expect(setup).toMatch(/公开分组.*不适合.*权限.*专属分组/)
+    expect(setup).toContain('列设置')
+    expect(setup).toContain('`#24` 对应配置值 `24`')
+    expect(setup).toContain('用户管理')
+    expect(setup).toContain('分组配置')
+    expect(setup).toContain('勾选“分销代理”专属分组')
+  })
+
+  it('documents the allowed group in production, local, and reference env sections', () => {
+    const readme = repositoryFile('README.md')
+    const production = sectionBetween(
+      readme,
+      '### 第 6 步：填写生产环境配置',
+      '### 第 7 步：构建并启动容器',
+    )
+    const local = sectionBetween(
+      readme,
+      '本地 `.env` 示例：',
+      '开发模式下 Vite',
+    )
+    const reference = sectionBetween(
+      readme,
+      '## 环境变量参考',
+      '## 本地开发',
+    )
+
+    expect(production).toMatch(
+      /SUB2API_ADMIN_API_KEY=REPLACE_ME_ADMIN_KEY\r?\nREDEEM_ALLOWED_GROUP_ID=24/,
+    )
+    expect(local).toMatch(
+      /SUB2API_ADMIN_API_KEY=REPLACE_ME_ADMIN_KEY\r?\nREDEEM_ALLOWED_GROUP_ID=24/,
+    )
+    expect(production).toContain('`#24` 对应填写 `24`，不要填写 `#24`')
+    expect(production).toContain('修改 `.env` 后必须删除并重建容器')
+    expect(reference).toMatch(
+      /^\| `REDEEM_ALLOWED_GROUP_ID` \| 无，必填 \|.*正整数.*只填数字.*24.*\|$/m,
+    )
+    expect(reference).toContain('只填数字不带 `#`')
+  })
+
+  it('documents the required allowed-group migration before replacing a deployment', () => {
+    const readme = repositoryFile('README.md')
+    const upgrade = sectionBetween(
+      readme,
+      '### 升级项目',
+      '升级失败时，在同一个 SSH 会话中回滚旧镜像：',
+    )
+
+    expect(upgrade).toContain('对照最新的 `.env.example`')
+    expect(upgrade).toContain('REDEEM_ALLOWED_GROUP_ID=24')
+    expect(upgrade).toContain('按实际专属分组 ID 填写')
+    expect(upgrade).toContain('缺少该变量会导致新容器拒绝启动')
+
+    const pullIndex = upgrade.indexOf('git pull --ff-only')
+    const allowedGroupIndex = upgrade.indexOf('REDEEM_ALLOWED_GROUP_ID=24')
+    const buildIndex = upgrade.indexOf('sudo docker build')
+    const removeIndex = upgrade.indexOf('sudo docker rm -f')
+
+    expect(pullIndex).toBeGreaterThanOrEqual(0)
+    expect(allowedGroupIndex).toBeGreaterThan(pullIndex)
+    expect(buildIndex).toBeGreaterThan(allowedGroupIndex)
+    expect(removeIndex).toBeGreaterThan(buildIndex)
+  })
+
+  it('documents access denial troubleshooting and custom menu limits', () => {
+    const readme = repositoryFile('README.md')
+    const menu = sectionBetween(
+      readme,
+      '### 第 10 步：在 sub2api 添加自定义菜单',
+      '### 第 11 步：完成上线验收',
+    )
+    const troubleshooting = sectionBetween(
+      readme,
+      '### 页面显示“暂无余额兑换权限”',
+      '### 生成兑换码后余额没有刷新',
+    )
+    const startupTroubleshooting = sectionBetween(
+      readme,
+      '### 容器启动后立即退出',
+      '### `healthz` 无法访问',
+    )
+
+    expect(menu).toMatch(/自定义菜单.*普通用户可见.*管理员可见/)
+    expect(menu).toContain('不能按专属分组隐藏')
+    expect(menu).toContain('未授权用户也可能看见入口')
+    expect(menu).toContain('后端仍会返回 HTTP 403')
+    expect(menu).toContain('本工具不修改 sub2api')
+    expect(troubleshooting).toContain('HTTP 403')
+    expect(troubleshooting).toContain('`REDEEM_ACCESS_DENIED`')
+    expect(troubleshooting).toContain('已启用的专属分组')
+    expect(troubleshooting).toContain('用户已勾选')
+    expect(troubleshooting).toContain('删除并重建容器')
+    expect(troubleshooting).toMatch(
+      /用户被移出专属分组后.*立即返回 HTTP 403/,
+    )
+    expect(troubleshooting).toMatch(
+      /重新加入并保存分组后.*点击“重新检查”/,
+    )
+    expect(troubleshooting).toMatch(
+      /REDEEM_ALLOWED_GROUP_ID.*实际分组 ID.*不一致.*服务可以启动.*用户.*无权限/,
+    )
+    expect(startupTroubleshooting).toMatch(
+      /REDEEM_ALLOWED_GROUP_ID.*缺失.*带.*`#`.*非正整数/,
+    )
+    expect(readme).not.toMatch(/SUB2API_ADMIN_API_KEY=admin-[^\s]+/)
+    expect(readme).not.toMatch(/[?&]token=(?!\.\.\.)[A-Za-z0-9_-]{16,}/)
+  })
+
+  it('keeps the concrete public deployment domain examples', () => {
+    const readme = repositoryFile('README.md')
+    const prerequisites = sectionBetween(
+      readme,
+      '### 第 0 步：准备服务器、域名和权限',
+      '### 第 1 步：解析工具域名',
+    )
+    const iframeTroubleshooting = sectionBetween(
+      readme,
+      '### iframe 显示“会话失效”，但新窗口可以使用',
+      '### 页面显示需要登录或返回 401',
+    )
+
+    expect(prerequisites).toContain(
+      '| `sub.example.com` | 现有 sub2api 地址 | 你的 sub2api 域名，例如 `www.cyapi.cyou` |',
+    )
+    expect(prerequisites).toContain(
+      '| `code.example.com` | 本工具地址 | 与 sub2api 同主域的子域，例如 `code.cyapi.cyou` |',
+    )
+    expect(prerequisites).toContain(
+      '`www.cyapi.cyou` 和 `code.cyapi.cyou` 可以',
+    )
+    expect(iframeTroubleshooting).toMatch(
+      /sub2api: https:\/\/www\.cyapi\.cyou\r?\n工具:\s+http:\/\/localhost:5173/,
+    )
+    expect(iframeTroubleshooting).toMatch(
+      /sub2api: https:\/\/www\.cyapi\.cyou\r?\n工具:\s+https:\/\/code\.cyapi\.cyou/,
+    )
   })
 
   it('loads the local server environment from .env in the dev command', () => {

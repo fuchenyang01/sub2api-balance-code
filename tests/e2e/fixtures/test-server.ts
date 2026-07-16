@@ -95,6 +95,7 @@ async function createDefaultCandidate(mock: MockSub2Api): Promise<TestAppCandida
     port,
     sub2apiBaseUrl: mock.origin,
     sub2apiAdminApiKey: mockAdminApiKey,
+    redeemAllowedGroupId: 24,
     appOrigin: origin,
     sub2apiOrigin: mock.origin,
     sessionSecret: SESSION_SECRET,

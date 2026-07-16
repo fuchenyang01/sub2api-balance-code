@@ -88,6 +88,7 @@ const safeMessages: Record<ErrorCode, string> = {
   SESSION_REQUIRED: '会话已失效',
   SESSION_INVALID: '会话已失效',
   SESSION_EXPIRED: '会话已失效',
+  REDEEM_ACCESS_DENIED: '暂无余额兑换权限，请联系管理员',
   AMOUNT_INVALID: '请输入有效金额',
   AMOUNT_EXCEEDS_BALANCE: '兑换金额不能超过当前余额',
   OPERATION_TOKEN_INVALID: '操作已失效，请重新生成',

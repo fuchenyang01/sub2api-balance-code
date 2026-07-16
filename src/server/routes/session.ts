@@ -5,6 +5,7 @@ import { decodeJwt } from 'jose'
 import type { MeResponse } from '../../shared/contracts.js'
 import type { AppConfig } from '../config.js'
 import { AppError } from '../errors.js'
+import { requireRedeemAccess } from '../security/redeem-access.js'
 import type { SessionPayload } from '../security/secrets.js'
 import { isUpstreamError } from '../sub2api/http.js'
 import type { Profile } from '../sub2api/types.js'
@@ -175,6 +176,8 @@ async function revalidateSession(
     throw new AppError('SESSION_INVALID', 401, '会话无效')
   }
 
+  requireRedeemAccess(latest, dependencies.config.redeemAllowedGroupId)
+
   return { ...identity, profile: latest }
 }
 
@@ -243,6 +246,7 @@ export function registerSessionRoutes(
     async (request, reply) => {
       const userJwt = request.body.token
       const { profile, expiresAt } = await exchangeIdentity(dependencies.users, userJwt)
+      requireRedeemAccess(profile, dependencies.config.redeemAllowedGroupId)
       const session = await dependencies.secrets.sealSession({
         userJwt,
         userId: profile.id,

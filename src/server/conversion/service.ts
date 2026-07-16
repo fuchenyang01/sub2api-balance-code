@@ -8,6 +8,7 @@ import {
 } from '../../shared/contracts.js'
 import { amountToUpstreamNumber, normalizeAmount, parseAmount } from '../amount.js'
 import { AppError } from '../errors.js'
+import { requireRedeemAccess } from '../security/redeem-access.js'
 import type { OperationPayload, SecretsService } from '../security/secrets.js'
 import type { AdminClient } from '../sub2api/admin-client.js'
 import {
@@ -111,17 +112,20 @@ export class ConversionService {
   readonly #users: UserClient
   readonly #admin: AdminClient
   readonly #secrets: OperationSecrets
+  readonly #allowedGroupId: number
   readonly #mutex: KeyedMutex<number>
 
   constructor(
     users: UserClient,
     admin: AdminClient,
     secrets: OperationSecrets,
+    allowedGroupId: number,
     mutex: KeyedMutex<number> = new KeyedMutex<number>(),
   ) {
     this.#users = users
     this.#admin = admin
     this.#secrets = secrets
+    this.#allowedGroupId = allowedGroupId
     this.#mutex = mutex
   }
 
@@ -143,6 +147,7 @@ export class ConversionService {
     if (profile.id !== userId) {
       throw new AppError('SESSION_INVALID', 401, '会话用户不一致')
     }
+    requireRedeemAccess(profile, this.#allowedGroupId)
     if (totalAmount.gt(profile.balance)) {
       throw new AppError('AMOUNT_EXCEEDS_BALANCE', 409, '金额超过当前余额')
     }
@@ -192,6 +197,7 @@ export class ConversionService {
     if (profile.id !== operation.userId) {
       throw new AppError('SESSION_INVALID', 401, '会话用户不一致')
     }
+    requireRedeemAccess(profile, this.#allowedGroupId)
 
     let generated: RedeemCode[]
 

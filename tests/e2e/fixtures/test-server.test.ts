@@ -34,6 +34,7 @@ function fakeMock(close = vi.fn(async () => undefined)): MockSub2Api {
     origin: 'http://127.0.0.1:41001',
     userToken: 'test-token',
     setMode: vi.fn(),
+    setAllowedGroups: vi.fn(),
     setIframeChildUrl: vi.fn(),
     totalGenerateRequests: vi.fn(() => 0),
     totalDebitRequests: vi.fn(() => 0),

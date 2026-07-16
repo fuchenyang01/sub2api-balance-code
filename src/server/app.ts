@@ -44,6 +44,7 @@ const safeMessages: Record<ErrorCode, string> = {
   SESSION_REQUIRED: '需要登录',
   SESSION_INVALID: '会话无效',
   SESSION_EXPIRED: '会话已过期',
+  REDEEM_ACCESS_DENIED: '暂无余额兑换权限，请联系管理员',
   AMOUNT_INVALID: '金额格式无效',
   AMOUNT_EXCEEDS_BALANCE: '金额超过当前余额',
   OPERATION_TOKEN_INVALID: '操作令牌无效',
@@ -203,7 +204,8 @@ export function buildApp(
       config.upstreamTimeoutMs,
     )
   const conversions =
-    optionalDependencies.conversions ?? new ConversionService(users, admin, secrets)
+    optionalDependencies.conversions ??
+    new ConversionService(users, admin, secrets, config.redeemAllowedGroupId)
   const serveWeb = config.nodeEnv === 'production'
   const webRoot =
     optionalDependencies.webRoot ?? resolve(fileURLToPath(new URL('../web', import.meta.url)))

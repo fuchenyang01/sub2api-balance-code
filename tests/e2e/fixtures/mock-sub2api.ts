@@ -18,6 +18,7 @@ export interface MockSub2Api {
   readonly origin: string
   readonly userToken: string
   setMode(mode: MockMode): void
+  setAllowedGroups(groupIds: number[]): void
   setIframeChildUrl(url: string): void
   totalGenerateRequests(): number
   totalDebitRequests(): number
@@ -72,6 +73,7 @@ function closeServer(server: ReturnType<typeof createServer>): Promise<void> {
 
 export async function startMockSub2Api(): Promise<MockSub2Api> {
   let mode: MockMode = 'success'
+  let allowedGroups = [24]
   let balance = 100
   let nextCodeId = 1
   let successfulDebits = 0
@@ -116,6 +118,7 @@ export async function startMockSub2Api(): Promise<MockSub2Api> {
         username: '测试用户',
         balance,
         status: 'active',
+        allowed_groups: allowedGroups,
       })
       return
     }
@@ -246,6 +249,7 @@ export async function startMockSub2Api(): Promise<MockSub2Api> {
     origin,
     userToken,
     setMode: (nextMode) => { mode = nextMode },
+    setAllowedGroups: (groupIds) => { allowedGroups = [...groupIds] },
     setIframeChildUrl: (url) => { iframeChildUrl = url },
     totalGenerateRequests: () => generateRequests,
     totalDebitRequests: () => debitRequests,
@@ -263,6 +267,7 @@ export async function startMockSub2Api(): Promise<MockSub2Api> {
         debitRequests = 0
         deletedCodes = 0
         iframeChildUrl = null
+        allowedGroups = [24]
       })()
       return closing
     },

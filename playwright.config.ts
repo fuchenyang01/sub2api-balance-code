@@ -16,7 +16,7 @@ export default defineConfig({
   projects: [
     {
       name: 'desktop',
-      testMatch: '**/conversion.spec.ts',
+      testMatch: ['**/conversion.spec.ts', '**/authorization.spec.ts'],
       use: { ...devices['Desktop Chrome'], viewport: { width: 1_280, height: 800 } },
     },
     {

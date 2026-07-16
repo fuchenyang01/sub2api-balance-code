@@ -281,6 +281,10 @@ describe('useConversion initialization', () => {
     history.replaceState(null, '', '/')
   })
 
+  afterEach(() => {
+    history.replaceState(null, '', '/')
+  })
+
   it('exchanges a URL token once, removes sensitive query data, preserves safe data, then loads live profile', async () => {
     history.replaceState(
       null,
@@ -352,6 +356,105 @@ describe('useConversion initialization', () => {
     )
     expect(conversion.session.value).toBe('authenticated')
     expect(conversion.profile.value).toEqual(profile)
+  })
+
+  it('keeps an access-denied URL token in memory and retries it on refresh', async () => {
+    history.replaceState(null, '', '/?token=user-jwt')
+    const exchange = vi.fn()
+      .mockRejectedValueOnce(new ApiClientError('REDEEM_ACCESS_DENIED', 403, 'denied'))
+      .mockResolvedValueOnce(profile)
+    const me = vi.fn().mockResolvedValue(profile)
+    const conversion = createUseConversion(api({ exchange, me }))
+
+    await conversion.initialize()
+
+    expect(location.search).toBe('')
+    expect(exchange).toHaveBeenCalledTimes(1)
+    expect(me).not.toHaveBeenCalled()
+    expect(conversion.session.value).toBe('unauthorized')
+    expect(conversion.profile.value).toBeNull()
+
+    await conversion.refresh()
+
+    expect(exchange).toHaveBeenCalledTimes(2)
+    expect(exchange).toHaveBeenLastCalledWith('user-jwt')
+    expect(me).toHaveBeenCalledTimes(1)
+    expect(conversion.session.value).toBe('authenticated')
+    expect(conversion.profile.value).toEqual(profile)
+  })
+
+  it('distinguishes a transient retry failure after URL-token access denial and keeps the token retryable', async () => {
+    history.replaceState(null, '', '/?token=user-jwt')
+    const exchange = vi.fn()
+      .mockRejectedValueOnce(new ApiClientError('REDEEM_ACCESS_DENIED', 403, 'denied'))
+      .mockRejectedValueOnce(
+        new ApiClientError('UPSTREAM_UNAVAILABLE', 503, 'retry-503', '服务暂时不可用'),
+      )
+      .mockResolvedValueOnce(profile)
+    const me = vi.fn().mockResolvedValue(profile)
+    const conversion = createUseConversion(api({ exchange, me }))
+
+    await conversion.initialize()
+
+    expect(conversion.session.value).toBe('unauthorized')
+    expect(conversion.profile.value).toBeNull()
+
+    await conversion.refresh()
+
+    expect(exchange).toHaveBeenCalledTimes(2)
+    expect(me).not.toHaveBeenCalled()
+    expect(conversion.session.value).toBe('error')
+    expect(conversion.error.value).toMatchObject({
+      code: 'UPSTREAM_UNAVAILABLE',
+      retryable: true,
+    })
+
+    await conversion.refresh()
+
+    expect(exchange).toHaveBeenCalledTimes(3)
+    expect(exchange).toHaveBeenLastCalledWith('user-jwt')
+    expect(me).toHaveBeenCalledTimes(1)
+    expect(conversion.session.value).toBe('authenticated')
+    expect(conversion.profile.value).toEqual(profile)
+  })
+
+  it('preserves pending recovery when an authenticated profile refresh loses access', async () => {
+    const ready: PendingOperation = {
+      version: 2,
+      operation_id: 'pending-access-check',
+      amount: '2.5',
+      count: 1,
+      state: 'ready',
+      operation_token: 'pending-secret',
+      expires_at: expiresAt,
+    }
+    const shared = sharedStorage(ready)
+    const me = vi.fn()
+      .mockResolvedValueOnce(profile)
+      .mockRejectedValueOnce(new ApiClientError('REDEEM_ACCESS_DENIED', 403, 'denied'))
+    const conversion = createUseConversion(api({ me }), shared.store)
+
+    await conversion.initialize()
+    await conversion.refresh()
+
+    expect(conversion.session.value).toBe('unauthorized')
+    expect(conversion.profile.value).toBeNull()
+    expect(conversion.pendingOperation.value).toEqual(ready)
+    expect(shared.pending()).toEqual(ready)
+    expect(shared.clearPending).not.toHaveBeenCalled()
+  })
+
+  it('marks redemption access denial as non-retryable', async () => {
+    const conversion = createUseConversion(api({
+      me: vi.fn().mockRejectedValue(new ApiClientError('REDEEM_ACCESS_DENIED', 403, 'denied')),
+    }))
+
+    await conversion.initialize()
+
+    expect(conversion.error.value).toMatchObject({
+      code: 'REDEEM_ACCESS_DENIED',
+      retryable: false,
+    })
   })
 
   it('removes empty token and user_id parameters before using the cookie session', async () => {
@@ -676,6 +779,48 @@ describe('useConversion conversion', () => {
       status: 'completed', codes: [{ code: 'CODE-123' }],
     })
     expect(conversion.pending.value).toBeNull()
+  })
+
+  it('keeps ready recovery data when execute denies redemption access', async () => {
+    vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(operationId)
+    const shared = sharedStorage()
+    const execute = vi.fn().mockRejectedValue(
+      new ApiClientError('REDEEM_ACCESS_DENIED', 403, 'execute-denied'),
+    )
+    const conversion = createUseConversion(
+      api({ execute }),
+      shared.store,
+      exclusiveCoordinator(),
+    )
+    await conversion.initialize()
+
+    await conversion.convert('1.25')
+
+    expect(conversion.session.value).toBe('unauthorized')
+    expect(conversion.profile.value).toBeNull()
+    expect(conversion.pendingOperation.value).toMatchObject({
+      operation_id: operationId,
+      state: 'ready',
+      operation_token: 'operation-secret',
+    })
+    expect(shared.pending()).toEqual(conversion.pendingOperation.value)
+    expect(shared.clearPending).not.toHaveBeenCalled()
+  })
+
+  it('keeps an authenticated tool session for ordinary conversion errors', async () => {
+    vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(operationId)
+    const conversion = createUseConversion(api({
+      prepare: vi.fn().mockRejectedValue(
+        new ApiClientError('RATE_LIMITED', 429, 'prepare-rate-limited'),
+      ),
+    }), storage(), exclusiveCoordinator())
+    await conversion.initialize()
+
+    await conversion.convert('1.25')
+
+    expect(conversion.session.value).toBe('authenticated')
+    expect(conversion.profile.value).toEqual(profile)
+    expect(conversion.error.value).toMatchObject({ code: 'RATE_LIMITED', retryable: true })
   })
 
   it('reloads the live profile after a completed conversion', async () => {

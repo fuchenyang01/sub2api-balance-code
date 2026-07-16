@@ -14,6 +14,10 @@ const styles = readFileSync(join(process.cwd(), 'src/web/styles.css'), 'utf8')
 
 const appController = vi.hoisted((): {
   session: string
+  sessionRef: null | { value: string }
+  busy: boolean
+  busyRef: null | { value: boolean }
+  profile: null | { id: number; username: string; balance: string }
   error: null | { code: string; message: string; requestId: string; retryable: boolean }
   convert: ReturnType<typeof vi.fn>
   initialize: ReturnType<typeof vi.fn>
@@ -26,6 +30,10 @@ const appController = vi.hoisted((): {
   storageReady: boolean
 } => ({
   session: 'authenticated',
+  sessionRef: null,
+  busy: false,
+  busyRef: null,
+  profile: { id: 7, username: 'alice', balance: '10' },
   error: null,
   convert: vi.fn(),
   initialize: vi.fn(),
@@ -49,24 +57,30 @@ vi.mock('../../src/web/composables/useConversion.js', async (importOriginal) => 
   const actual = await importOriginal<typeof import('../../src/web/composables/useConversion.js')>()
   return {
     ...actual,
-    useConversion: () => ({
-      session: ref(appController.session),
-      profile: ref({ id: 7, username: 'alice', balance: '10' }),
-      result: ref(appController.result),
-      pending: ref(null),
-      pendingOperation: ref(appController.pendingOperation),
-      history: ref(appController.history),
-      error: ref(appController.error),
-      loading: ref(false),
-      busy: ref(false),
-      storageReady: ref(appController.storageReady),
-      initialize: appController.initialize,
-      refresh: appController.refresh,
-      logout: vi.fn(),
-      convert: appController.convert,
-      resumePending: appController.resumePending,
-      clearHistory: appController.clearHistory,
-    }),
+    useConversion: () => {
+      const session = ref(appController.session)
+      const busy = ref(appController.busy)
+      appController.sessionRef = session
+      appController.busyRef = busy
+      return {
+        session,
+        profile: ref(appController.profile),
+        result: ref(appController.result),
+        pending: ref(null),
+        pendingOperation: ref(appController.pendingOperation),
+        history: ref(appController.history),
+        error: ref(appController.error),
+        loading: ref(false),
+        busy,
+        storageReady: ref(appController.storageReady),
+        initialize: appController.initialize,
+        refresh: appController.refresh,
+        logout: vi.fn(),
+        convert: appController.convert,
+        resumePending: appController.resumePending,
+        clearHistory: appController.clearHistory,
+      }
+    },
   }
 })
 
@@ -79,6 +93,21 @@ import HistoryList from '../../src/web/components/HistoryList.vue'
 import PendingOperation from '../../src/web/components/PendingOperation.vue'
 
 beforeEach(() => {
+  appController.session = 'authenticated'
+  appController.sessionRef = null
+  appController.busy = false
+  appController.busyRef = null
+  appController.profile = { id: 7, username: 'alice', balance: '10' }
+  appController.error = null
+  appController.pendingOperation = null
+  appController.result = null
+  appController.history = []
+  appController.storageReady = true
+  appController.convert.mockReset()
+  appController.initialize.mockReset()
+  appController.refresh.mockReset()
+  appController.resumePending.mockReset()
+  appController.clearHistory.mockReset()
   clipboardController.copyText.mockReset()
 })
 
@@ -434,6 +463,24 @@ describe('App', () => {
     expect(appController.convert).not.toHaveBeenCalled()
   })
 
+  it('clears an open confirmation when access is lost so it stays closed after reauthorization', async () => {
+    const wrapper = mount(App)
+    await wrapper.get('[aria-label="兑换金额"]').setValue('1')
+    await wrapper.get('form').trigger('submit')
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(true)
+
+    appController.sessionRef!.value = 'unauthorized'
+    await nextTick()
+
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('暂无余额兑换权限')
+
+    appController.sessionRef!.value = 'authenticated'
+    await nextTick()
+
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+  })
+
   it('renders a retryable service error separately from an expired session', async () => {
     appController.session = 'error'
     appController.error = {
@@ -451,6 +498,63 @@ describe('App', () => {
 
     appController.session = 'authenticated'
     appController.error = null
+  })
+
+  it('hides conversion and recovery data when the account lacks redemption access', async () => {
+    appController.session = 'unauthorized'
+    appController.profile = null
+    appController.pendingOperation = {
+      version: 2,
+      operation_id: 'hidden-operation',
+      amount: '2.5',
+      count: 1,
+      state: 'ready',
+      operation_token: 'hidden-token',
+      expires_at: '2099-07-13T01:00:00.000Z',
+    }
+    appController.result = completedBatch(1, 'hidden-result')
+    appController.history = [{
+      version: 2,
+      history_id: 'hidden-operation:1',
+      operation_id: 'hidden-operation',
+      batch_index: 1,
+      batch_size: 1,
+      amount: '2.5',
+      code: 'hidden-history',
+      created_at: '2026-07-14T00:00:00.000Z',
+    }]
+    const wrapper = mount(App)
+
+    expect(wrapper.text()).toContain('暂无余额兑换权限')
+    expect(wrapper.text()).toContain('当前账号未加入“分销代理”专属分组，请联系管理员。')
+    expect(wrapper.find('[aria-label="兑换金额"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('hidden-operation')
+    expect(wrapper.text()).not.toContain('hidden-token')
+    expect(wrapper.text()).not.toContain('hidden-history')
+    expect(wrapper.text()).not.toContain('发现待处理操作')
+    expect(wrapper.text()).not.toContain('历史兑换码')
+    expect(wrapper.find('[data-testid="resume-pending"]').exists()).toBe(false)
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+
+    await wrapper.get('[data-testid="retry-access"]').trigger('click')
+    expect(appController.refresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('exposes busy state while redemption access is being checked', async () => {
+    appController.session = 'unauthorized'
+    appController.profile = null
+    const wrapper = mount(App)
+    const retry = wrapper.get('[data-testid="retry-access"]')
+
+    expect(retry.attributes('aria-busy')).toBe('false')
+    expect(retry.text()).toBe('重新检查')
+
+    appController.busyRef!.value = true
+    await nextTick()
+
+    expect(retry.attributes('aria-busy')).toBe('true')
+    expect(retry.attributes('disabled')).toBeDefined()
+    expect(retry.text()).toBe('正在检查')
   })
 
   it('shows stored recovery metadata without its token and hiding lasts only for the current mount', async () => {

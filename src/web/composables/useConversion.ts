@@ -10,7 +10,7 @@ import { browserStorage, type ConversionStorage } from '../storage.js'
 
 type CompletedResult = Extract<ExecuteResponse, { status: 'completed' }>
 type PendingResult = Extract<ExecuteResponse, { status: 'pending' }>
-export type SessionState = 'loading' | 'authenticated' | 'expired' | 'error'
+export type SessionState = 'loading' | 'authenticated' | 'unauthorized' | 'expired' | 'error'
 
 export interface ConversionError {
   code: ErrorCode
@@ -39,6 +39,7 @@ export interface ConversionController {
 }
 
 const sessionCodes = new Set<ErrorCode>(['SESSION_REQUIRED', 'SESSION_INVALID', 'SESSION_EXPIRED'])
+const accessCodes = new Set<ErrorCode>(['REDEEM_ACCESS_DENIED'])
 const retryableCodes = new Set<ErrorCode>([
   'RATE_LIMITED',
   'CONVERSION_IN_PROGRESS',
@@ -323,11 +324,14 @@ export function createUseConversion(
 
   function handleError(caught: unknown): void {
     const safeError = toConversionError(caught)
-    if (sessionCodes.has(safeError.code)) {
+    if (accessCodes.has(safeError.code)) {
+      session.value = 'unauthorized'
+      profile.value = null
+    } else if (sessionCodes.has(safeError.code)) {
       pendingExchangeToken = null
       session.value = 'expired'
       profile.value = null
-    } else if (session.value === 'loading') {
+    } else if (session.value === 'loading' || session.value === 'unauthorized') {
       session.value = 'error'
     }
     if (!safetyFailureActive) error.value = safeError

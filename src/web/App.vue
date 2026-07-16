@@ -39,6 +39,10 @@ watch(
   },
 )
 
+watch(authenticated, (value) => {
+  if (!value) confirmation.value = null
+})
+
 onMounted(() => {
   void conversion.initialize()
 })
@@ -87,6 +91,28 @@ onMounted(() => {
         </div>
       </section>
 
+      <section
+        v-else-if="conversion.session.value === 'unauthorized'"
+        class="session-state session-expired"
+        aria-labelledby="access-title"
+      >
+        <LockKeyhole :size="24" aria-hidden="true" />
+        <div>
+          <h1 id="access-title">暂无余额兑换权限</h1>
+          <p>当前账号未加入“分销代理”专属分组，请联系管理员。</p>
+          <button
+            type="button"
+            class="secondary-button session-retry"
+            data-testid="retry-access"
+            :disabled="conversion.busy.value"
+            :aria-busy="conversion.busy.value"
+            @click="conversion.refresh"
+          >
+            {{ conversion.busy.value ? '正在检查' : '重新检查' }}
+          </button>
+        </div>
+      </section>
+
       <section v-else-if="!authenticated" class="session-state session-expired" aria-labelledby="session-title">
         <LockKeyhole :size="24" aria-hidden="true" />
         <div>
@@ -129,7 +155,7 @@ onMounted(() => {
     </main>
 
     <ConfirmDialog
-      :open="confirmation !== null"
+      :open="authenticated && confirmation !== null"
       :amount="confirmation?.amount ?? ''"
       :count="confirmation?.count ?? 1"
       :total-amount="confirmation?.totalAmount ?? ''"
