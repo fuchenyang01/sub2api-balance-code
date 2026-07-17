@@ -1,5 +1,5 @@
 const maxUserAgentBytes = 512
-const controlCharacterPattern = /[\u0000-\u001f\u007f]/u
+const controlCharacterPattern = /[\u0000-\u001f\u007f-\u009f]/u
 
 export interface UpstreamUserContext {
   userAgent: string

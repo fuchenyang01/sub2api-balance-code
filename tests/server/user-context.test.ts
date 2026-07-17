@@ -21,6 +21,7 @@ describe('createUpstreamUserContext', () => {
     ['NUL control character', 'Browser\u0000Agent'],
     ['tab control character', 'Browser\tAgent'],
     ['DEL control character', 'Browser\u007fAgent'],
+    ['C1 NEL control character', 'Browser\u0085Agent'],
     ['over 512 UTF-8 bytes', '测'.repeat(171)],
   ] as const)('rejects %s without fabricating a value', (_label, userAgent) => {
     expect(createUpstreamUserContext(userAgent)).toBeUndefined()
