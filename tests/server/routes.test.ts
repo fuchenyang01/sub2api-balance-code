@@ -14,6 +14,7 @@ import { redactionPaths } from '../../src/server/security/redaction.js'
 import { SecretsService } from '../../src/server/security/secrets.js'
 import { UpstreamError } from '../../src/server/sub2api/http.js'
 import type { Profile } from '../../src/server/sub2api/types.js'
+import type { UpstreamUserContext } from '../../src/server/sub2api/user-context.js'
 import type { UserClient } from '../../src/server/sub2api/user-client.js'
 
 const sessionSecret = 'session-secret-that-is-at-least-32-bytes'
@@ -21,6 +22,7 @@ const operationSecret = 'operation-secret-that-is-at-least-32-bytes'
 const operationId = '123e4567-e89b-42d3-a456-426614174000'
 const appOrigin = 'https://app.example.test'
 const sub2apiOrigin = 'https://sub2api.example.test'
+const browserUserAgent = 'Browser-UA/route-test'
 
 const config: Readonly<AppConfig> = Object.freeze({
   nodeEnv: 'test',
@@ -60,20 +62,27 @@ function jwt(exp: number = Math.floor(Date.now() / 1_000) + 3_600): string {
 
 class FakeUsers implements UserClient {
   calls: string[] = []
+  contexts: Array<UpstreamUserContext | undefined> = []
   probeCalls: string[] = []
+  probeContexts: Array<UpstreamUserContext | undefined> = []
   probeStatus: number | null = null
   probeError: unknown
   currentProfile: Profile = profile
   error: unknown
 
-  async getProfile(userJwt: string): Promise<Profile> {
+  async getProfile(userJwt: string, context?: UpstreamUserContext): Promise<Profile> {
     this.calls.push(userJwt)
+    this.contexts.push(context)
     if (this.error !== undefined) throw this.error
     return this.currentProfile
   }
 
-  async probeAuthentication(userJwt: string): Promise<number | null> {
+  async probeAuthentication(
+    userJwt: string,
+    context?: UpstreamUserContext,
+  ): Promise<number | null> {
     this.probeCalls.push(userJwt)
+    this.probeContexts.push(context)
     if (this.probeError !== undefined) throw this.probeError
     return this.probeStatus
   }
@@ -144,11 +153,16 @@ async function setup(overrides: Partial<AppDependencies> = {}) {
   return { app, users, conversions }
 }
 
-async function exchange(app: FastifyInstance, userJwt = jwt(), url = '/api/session/exchange') {
+async function exchange(
+  app: FastifyInstance,
+  userJwt = jwt(),
+  url = '/api/session/exchange',
+  userAgent = browserUserAgent,
+) {
   return app.inject({
     method: 'POST',
     url,
-    headers: { origin: appOrigin },
+    headers: { origin: appOrigin, 'user-agent': userAgent },
     payload: { token: userJwt },
   })
 }
@@ -236,6 +250,49 @@ describe('session routes', () => {
     expect(Date.parse(session.expiresAt)).toBeLessThanOrEqual(exp * 1_000)
     expect(session.expiresAt).toBe(new Date(exp * 1_000).toISOString())
   })
+
+  it('uses each current request User-Agent without persisting it in the session cookie', async () => {
+    const { app, users } = await setup()
+    const userJwt = jwt()
+    const loginUserAgent = 'Browser-UA/login'
+    const revalidationUserAgent = 'Browser-UA/revalidation'
+
+    const login = await exchange(
+      app,
+      userJwt,
+      '/api/session/exchange?user_agent=FORGED-QUERY-UA',
+      loginUserAgent,
+    )
+    const cookie = (login.headers['set-cookie'] as string).split(';', 1)[0]!
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/me',
+      headers: { cookie, 'user-agent': revalidationUserAgent },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(users.contexts).toEqual([
+      { userAgent: loginUserAgent },
+      { userAgent: revalidationUserAgent },
+    ])
+
+    const sealed = cookie.slice('redeem_session='.length)
+    expect(await secrets().unsealSession(sealed)).not.toHaveProperty('upstreamContext')
+  })
+
+  it.each(['', 'x'.repeat(513)])(
+    'does not fabricate a User-Agent for invalid input',
+    async (userAgent) => {
+      const { app, users } = await setup()
+      const userJwt = jwt()
+
+      const response = await exchange(app, userJwt, '/api/session/exchange', userAgent)
+
+      expect(response.statusCode).toBe(200)
+      expect(users.calls).toEqual([userJwt])
+      expect(users.contexts).toEqual([undefined])
+    },
+  )
 
   it('denies session exchange when the verified profile lacks redemption access', async () => {
     const { app, users } = await setup()
@@ -938,7 +995,8 @@ describe('security headers, rate limits, and logging', () => {
     const expiresAt = issuedAt + 3_600
     const userJwt = rawJwt({ iat: issuedAt, exp: expiresAt })
 
-    const response = await exchange(app, userJwt)
+    const diagnosticUserAgent = 'SECRET-BROWSER-UA/diagnostic'
+    const response = await exchange(app, userJwt, '/api/session/exchange', diagnosticUserAgent)
     await new Promise<void>((resolve) => setImmediate(resolve))
 
     expect(response.statusCode).toBe(401)
@@ -960,7 +1018,10 @@ describe('security headers, rate limits, and logging', () => {
     expect(output).not.toContain(userJwt)
     expect(output).not.toContain('UPSTREAM-PRIVATE-BODY')
     expect(output).not.toContain(privateReason)
+    expect(output).not.toContain(diagnosticUserAgent)
+    expect(response.body).not.toContain(diagnosticUserAgent)
     expect(users.probeCalls).toEqual([userJwt])
+    expect(users.probeContexts).toEqual([{ userAgent: diagnosticUserAgent }])
   })
 
   it('keeps the original session rejection when the auth probe fails', async () => {
