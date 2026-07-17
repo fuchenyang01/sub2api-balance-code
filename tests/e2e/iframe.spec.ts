@@ -42,6 +42,30 @@ test('exchanges the URL token across same-site origins and keeps the cookie usab
   expectNoBrowserErrors(errors)
 })
 
+test('offers top-level re-entry after the iframe tool session is lost', async ({
+  page,
+  context,
+  environment,
+}, testInfo) => {
+  await page.goto(environment.iframeParentUrl())
+  const tool = page.frameLocator('#tool-frame')
+  await expect(tool.getByText('测试用户')).toBeVisible()
+
+  await context.clearCookies()
+  const frame = page.frames().find((candidate: Frame) => candidate !== page.mainFrame())
+  expect(frame).toBeDefined()
+  await frame!.goto(frame!.url())
+
+  await expect(tool.getByRole('heading', { name: '登录状态已过期' })).toBeVisible()
+  const reentry = tool.getByTestId('session-reentry')
+  await expect(reentry).toHaveAttribute('href', `${environment.mock.origin}/custom/balance-code`)
+  await expect(reentry).toHaveAttribute('target', '_top')
+  const portal = tool.getByTestId('open-sub2api')
+  await expect(portal).toHaveAttribute('href', environment.mock.origin)
+  await expect(portal).toHaveAttribute('target', '_blank')
+  await page.screenshot({ path: testInfo.outputPath('session-reentry.png'), fullPage: true })
+})
+
 test('copies a completed code without clipboard-write delegation from the parent iframe', async ({
   page,
   context,

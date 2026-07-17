@@ -30,6 +30,10 @@ export interface MeResponse {
   balance: string
 }
 
+export interface PublicConfigResponse {
+  sub2api_entry_url: string
+}
+
 export const MIN_BATCH_COUNT = 1
 export const MAX_BATCH_COUNT = 100
 

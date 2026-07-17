@@ -51,6 +51,9 @@ beforeEach(() => {
 
 function api(overrides: Partial<ConversionApi> = {}): ConversionApi {
   return {
+    config: vi.fn().mockResolvedValue({
+      sub2api_entry_url: 'https://sub2api.example.test/custom/balance-code',
+    }),
     exchange: vi.fn().mockResolvedValue(profile),
     me: vi.fn().mockResolvedValue(profile),
     logout: vi.fn().mockResolvedValue(undefined),
@@ -298,6 +301,7 @@ describe('useConversion initialization', () => {
     await conversion.initialize()
 
     expect(client.exchange).toHaveBeenCalledTimes(1)
+    expect(client.config).toHaveBeenCalledTimes(1)
     expect(client.exchange).toHaveBeenCalledWith('jwt-secret')
     expect(client.me).toHaveBeenCalledTimes(1)
     expect(vi.mocked(client.exchange).mock.invocationCallOrder[0]).toBeLessThan(
@@ -308,7 +312,28 @@ describe('useConversion initialization', () => {
     expect(document.documentElement.dataset.uiMode).toBe('compact')
     expect(document.documentElement.lang).toBe('zh-CN')
     expect(conversion.profile.value).toEqual(profile)
+    expect(conversion.publicConfig.value).toEqual({
+      sub2api_entry_url: 'https://sub2api.example.test/custom/balance-code',
+    })
     expect(conversion.session.value).toBe('authenticated')
+  })
+
+  it('cleans the URL token but stops authentication when public config cannot be loaded', async () => {
+    history.replaceState(null, '', '/?token=jwt-secret&theme=dark')
+    const client = api({
+      config: vi.fn().mockRejectedValue(
+        new ApiClientError('UPSTREAM_UNAVAILABLE', 503, 'config-failure'),
+      ),
+    })
+    const conversion = createUseConversion(client)
+
+    await conversion.initialize()
+
+    expect(location.search).toBe('?theme=dark')
+    expect(client.exchange).not.toHaveBeenCalled()
+    expect(client.me).not.toHaveBeenCalled()
+    expect(conversion.publicConfig.value).toBeNull()
+    expect(conversion.session.value).toBe('error')
   })
 
   it('uses the cookie session without exchanging when no token is present', async () => {

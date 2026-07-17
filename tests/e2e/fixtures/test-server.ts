@@ -98,6 +98,7 @@ async function createDefaultCandidate(mock: MockSub2Api): Promise<TestAppCandida
     redeemAllowedGroupId: 24,
     appOrigin: origin,
     sub2apiOrigin: mock.origin,
+    sub2apiEntryUrl: `${mock.origin}/custom/balance-code`,
     sessionSecret: SESSION_SECRET,
     operationSigningSecret: OPERATION_SECRET,
     operationTtlMinutes: 60,

@@ -1,7 +1,7 @@
 import { Decimal } from 'decimal.js'
 import { ref, type Ref } from 'vue'
 
-import type { ErrorCode, ExecuteResponse, MeResponse } from '../../shared/contracts.js'
+import type { ErrorCode, ExecuteResponse, MeResponse, PublicConfigResponse } from '../../shared/contracts.js'
 import type { ExecutableOperation, HistoryItem, PendingOperation } from '../../shared/storage-types.js'
 import { ApiClientError, apiClient, type ConversionApi } from '../api.js'
 import { browserCoordinator, type ConversionCoordinator } from '../coordinator.js'
@@ -22,6 +22,7 @@ export interface ConversionError {
 export interface ConversionController {
   session: Ref<SessionState>
   profile: Ref<MeResponse | null>
+  publicConfig: Ref<PublicConfigResponse | null>
   result: Ref<CompletedResult | null>
   pending: Ref<PendingResult | null>
   pendingOperation: Ref<PendingOperation | null>
@@ -180,6 +181,7 @@ export function createUseConversion(
 ): ConversionController {
   const session = ref<SessionState>('loading')
   const profile = ref<MeResponse | null>(null)
+  const publicConfig = ref<PublicConfigResponse | null>(null)
   const result = ref<CompletedResult | null>(null)
   const pending = ref<PendingResult | null>(null)
   const pendingOperation = ref<PendingOperation | null>(null)
@@ -322,6 +324,10 @@ export function createUseConversion(
     session.value = 'authenticated'
   }
 
+  async function loadPublicConfig(): Promise<void> {
+    publicConfig.value = await api.config()
+  }
+
   function handleError(caught: unknown): void {
     const safeError = toConversionError(caught)
     if (accessCodes.has(safeError.code)) {
@@ -359,6 +365,7 @@ export function createUseConversion(
       }
       if (token !== null && token.length > 0) pendingExchangeToken = token
       try {
+        await loadPublicConfig()
         if (pendingExchangeToken !== null) {
           await api.exchange(pendingExchangeToken)
           pendingExchangeToken = null
@@ -379,6 +386,7 @@ export function createUseConversion(
     error.value = null
     try {
       await hydrateLocalState()
+      if (publicConfig.value === null) await loadPublicConfig()
       if (pendingExchangeToken !== null) {
         await api.exchange(pendingExchangeToken)
         pendingExchangeToken = null
@@ -601,6 +609,7 @@ export function createUseConversion(
   return {
     session,
     profile,
+    publicConfig,
     result,
     pending,
     pendingOperation,

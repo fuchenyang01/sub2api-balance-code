@@ -17,6 +17,7 @@ import { AppError } from './errors.js'
 import { registerConversionRoutes, type ConversionOperations } from './routes/conversions.js'
 import { registerHealthRoute } from './routes/health.js'
 import { registerMeRoute } from './routes/me.js'
+import { registerPublicConfigRoute } from './routes/public-config.js'
 import {
   clearSessionCookie,
   registerSessionRoutes,
@@ -235,6 +236,7 @@ export function buildApp(
     const sessionDependencies = { config, users, secrets }
     const sessions = new SessionReader(sessionDependencies)
     registerSessionRoutes(routes, sessionDependencies)
+    registerPublicConfigRoute(routes, config.sub2apiEntryUrl)
     registerMeRoute(routes, sessions)
     registerConversionRoutes(routes, sessions, conversions)
     registerHealthRoute(routes)

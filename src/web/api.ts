@@ -11,11 +11,13 @@ import {
   type MeResponse,
   type PrepareRequest,
   type PrepareResponse,
+  type PublicConfigResponse,
 } from '../shared/contracts.js'
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 
 export interface ConversionApi {
+  config(): Promise<PublicConfigResponse>
   exchange(token: string): Promise<MeResponse>
   me(): Promise<MeResponse>
   logout(): Promise<void>
@@ -48,6 +50,20 @@ const meResponseSchema = z.object({
   id: z.number().int().positive(),
   username: z.string(),
   balance: finitePlainDecimalSchema,
+}).strict()
+const publicConfigResponseSchema = z.object({
+  sub2api_entry_url: z.string().max(2_048).refine((value) => {
+    try {
+      const url = new URL(value)
+      return ['http:', 'https:'].includes(url.protocol)
+        && url.username === ''
+        && url.password === ''
+        && url.search === ''
+        && url.hash === ''
+    } catch {
+      return false
+    }
+  }),
 }).strict()
 const prepareResponseSchema = z.object({
   operation_token: z.string().min(1),
@@ -179,6 +195,7 @@ export function createApiClient(fetcher: Fetcher = globalThis.fetch.bind(globalT
   }
 
   return {
+    config: () => request('/api/config', 'GET', publicConfigResponseSchema),
     exchange: (token) => request('/api/session/exchange', 'POST', meResponseSchema, { token }),
     me: () => request('/api/me', 'GET', meResponseSchema),
     logout: () => request<void>('/api/session/logout', 'POST', null),

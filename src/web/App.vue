@@ -10,11 +10,15 @@ import HistoryList from './components/HistoryList.vue'
 import PendingOperation from './components/PendingOperation.vue'
 import { useConversion } from './composables/useConversion.js'
 import type { ConversionDraft } from './conversion-input.js'
+import { sessionReentryTarget } from './reentry.js'
 
 const conversion = useConversion()
 const confirmation = ref<ConversionDraft | null>(null)
 const pendingHidden = ref(false)
 const authenticated = computed(() => conversion.session.value === 'authenticated' && conversion.profile.value !== null)
+const reentryUrl = computed(() => conversion.publicConfig.value?.sub2api_entry_url ?? '')
+const sub2apiOrigin = computed(() => reentryUrl.value === '' ? '' : new URL(reentryUrl.value).origin)
+const reentryTarget = sessionReentryTarget(window.self !== window.top)
 
 function openConfirmation(draft: ConversionDraft): void {
   if (conversion.pendingOperation.value !== null) return
@@ -116,8 +120,23 @@ onMounted(() => {
       <section v-else-if="!authenticated" class="session-state session-expired" aria-labelledby="session-title">
         <LockKeyhole :size="24" aria-hidden="true" />
         <div>
-          <h1 id="session-title">会话已失效</h1>
-          <p>请返回来源系统重新打开余额兑换工具。</p>
+          <h1 id="session-title">登录状态已过期</h1>
+          <p>点击下方按钮重新进入，系统会自动获取最新登录状态。</p>
+          <div class="session-actions">
+            <a
+              class="primary-button"
+              data-testid="session-reentry"
+              :href="reentryUrl"
+              :target="reentryTarget"
+            >重新进入余额转换</a>
+            <a
+              class="secondary-button"
+              data-testid="open-sub2api"
+              :href="sub2apiOrigin"
+              target="_blank"
+              rel="noopener noreferrer"
+            >打开主站</a>
+          </div>
         </div>
       </section>
 

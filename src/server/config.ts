@@ -85,6 +85,7 @@ const envSchema = z.object({
   REDEEM_ALLOWED_GROUP_ID: requiredPositiveIntegerEnv,
   APP_ORIGIN: originSchema,
   SUB2API_ORIGIN: originSchema,
+  SUB2API_ENTRY_URL: baseUrlSchema,
   SESSION_SECRET: secretSchema,
   OPERATION_SIGNING_SECRET: secretSchema,
   PORT: integerEnv(3000, 1, 65_535),
@@ -103,6 +104,7 @@ export interface AppConfig {
   redeemAllowedGroupId: number
   appOrigin: string
   sub2apiOrigin: string
+  sub2apiEntryUrl: string
   sessionSecret: string
   operationSigningSecret: string
   operationTtlMinutes: number
@@ -118,12 +120,16 @@ export function loadConfig(input: NodeJS.ProcessEnv): Readonly<AppConfig> {
   if (env.SESSION_SECRET === env.OPERATION_SIGNING_SECRET) {
     throw new Error('session and operation secrets must differ')
   }
+  if (new URL(env.SUB2API_ENTRY_URL).origin !== env.SUB2API_ORIGIN) {
+    throw new Error('sub2api entry URL must match SUB2API_ORIGIN')
+  }
 
   if (
     env.NODE_ENV === 'production' &&
     (new URL(env.SUB2API_BASE_URL).protocol !== 'https:' ||
       !env.APP_ORIGIN.startsWith('https://') ||
       !env.SUB2API_ORIGIN.startsWith('https://') ||
+      !env.SUB2API_ENTRY_URL.startsWith('https://') ||
       !env.COOKIE_SECURE)
   ) {
     throw new Error('production origins and cookies must use HTTPS')
@@ -137,6 +143,7 @@ export function loadConfig(input: NodeJS.ProcessEnv): Readonly<AppConfig> {
     redeemAllowedGroupId: env.REDEEM_ALLOWED_GROUP_ID,
     appOrigin: env.APP_ORIGIN,
     sub2apiOrigin: env.SUB2API_ORIGIN,
+    sub2apiEntryUrl: env.SUB2API_ENTRY_URL,
     sessionSecret: env.SESSION_SECRET,
     operationSigningSecret: env.OPERATION_SIGNING_SECRET,
     operationTtlMinutes: env.OPERATION_TTL_MINUTES,

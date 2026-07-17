@@ -116,6 +116,7 @@ SUB2API_ADMIN_API_KEY=REPLACE_ME_ADMIN_KEY
 REDEEM_ALLOWED_GROUP_ID=24
 APP_ORIGIN=https://code.example.com
 SUB2API_ORIGIN=https://sub.example.com
+SUB2API_ENTRY_URL=https://sub.example.com/custom/balance-code
 SESSION_SECRET=REPLACE_WITH_FIRST_RANDOM_VALUE
 OPERATION_SIGNING_SECRET=REPLACE_WITH_SECOND_RANDOM_VALUE
 PORT=3000
@@ -130,6 +131,7 @@ COOKIE_SECURE=true
 
 - `SUB2API_BASE_URL` 和 `SUB2API_ORIGIN` 是 sub2api 的 HTTPS origin，不加 `/api/v1`；
 - `APP_ORIGIN` 是工具的 HTTPS origin，不带路径；
+- `SUB2API_ENTRY_URL` 是承载工具的 sub2api 自定义页面完整地址，必须与 `SUB2API_ORIGIN` 同源；
 - `REDEEM_ALLOWED_GROUP_ID` 只填数字，不带 `#`；
 - 两条 secret 至少 32 字节且不能相同。
 
@@ -234,6 +236,8 @@ curl -fsS https://code.example.com/healthz && echo
 
 URL 只填工具根地址。不要手工添加 Token、用户 ID 或管理员 API Key。
 
+当前 CYAPI 部署的重新进入地址是 `SUB2API_ENTRY_URL=https://www.cyapi.cyou/custom/71038ae6498c1ecb`。主站仍显示登录但工具提示“登录状态已过期”时，点击“重新进入余额转换”即可获取当前登录状态；不要只刷新 iframe。
+
 sub2api 菜单本身不能按专属分组隐藏，因此未授权用户可能看见入口，但服务端会返回 `403 / REDEEM_ACCESS_DENIED`。
 
 权限不正确时，只检查四项：确认分组是已启用的专属分组、确认用户已勾选该分组、确认 `.env` 中的数字 ID 正确、修改配置后删除并重建容器。`REDEEM_ALLOWED_GROUP_ID` 与实际分组 ID 不一致时，服务可以启动，但用户会显示无权限。用户被移出分组后会立即失去权限；重新加入分组后，在页面点击“重新检查”。
@@ -258,6 +262,7 @@ sub2api 菜单本身不能按专属分组隐藏，因此未授权用户可能看
 | `REDEEM_ALLOWED_GROUP_ID` | 允许兑换的专属分组数字 ID |
 | `APP_ORIGIN` | 工具对外访问 origin |
 | `SUB2API_ORIGIN` | sub2api origin，用于来源校验和 iframe CSP |
+| `SUB2API_ENTRY_URL` | sub2api 自定义页面完整地址，用于会话失效后重新进入 |
 | `SESSION_SECRET` | 加密用户会话，至少 32 字节 |
 | `OPERATION_SIGNING_SECRET` | 签名操作令牌，至少 32 字节且不能复用会话密钥 |
 | `TRUST_PROXY` | 本机 Nginx 反代时设为 `true` |
@@ -285,6 +290,7 @@ git pull --ff-only
 
 ```dotenv
 REDEEM_ALLOWED_GROUP_ID=24
+SUB2API_ENTRY_URL=https://sub.example.com/custom/balance-code
 ```
 
 然后构建并替换旧容器：

@@ -10,6 +10,7 @@ const requiredEnv = {
   REDEEM_ALLOWED_GROUP_ID: '24',
   APP_ORIGIN: 'https://app.example.com',
   SUB2API_ORIGIN: 'https://api.example.com',
+  SUB2API_ENTRY_URL: 'https://api.example.com/custom/balance-code/',
   SESSION_SECRET: 'session-secret-that-is-at-least-32-bytes',
   OPERATION_SIGNING_SECRET: 'operation-secret-that-is-at-least-32-bytes',
 } satisfies NodeJS.ProcessEnv
@@ -48,6 +49,7 @@ describe('loadConfig', () => {
       'SESSION_SECRET',
       'SUB2API_ADMIN_API_KEY',
       'SUB2API_BASE_URL',
+      'SUB2API_ENTRY_URL',
       'SUB2API_ORIGIN',
       'TRUST_PROXY',
       'UPSTREAM_TIMEOUT_MS',
@@ -90,6 +92,7 @@ describe('loadConfig', () => {
       redeemAllowedGroupId: 24,
       appOrigin: 'https://app.example.com',
       sub2apiOrigin: 'https://api.example.com',
+      sub2apiEntryUrl: 'https://api.example.com/custom/balance-code',
       sessionSecret: 'session-secret-that-is-at-least-32-bytes',
       operationSigningSecret: 'operation-secret-that-is-at-least-32-bytes',
       operationTtlMinutes: 120,
@@ -193,6 +196,24 @@ describe('loadConfig', () => {
     expect(() =>
       loadConfig(env({ NODE_ENV: 'production', [key]: 'http://example.com' })),
     ).toThrow()
+  })
+
+  it('requires an HTTPS sub2api entry URL in production', () => {
+    expect(() => loadConfig(env({
+      NODE_ENV: 'production',
+      SUB2API_ORIGIN: 'http://api.example.com',
+      SUB2API_ENTRY_URL: 'http://api.example.com/custom/balance-code',
+    }))).toThrow()
+  })
+
+  it.each([
+    'https://other.example.com/custom/balance-code',
+    'https://user:password@api.example.com/custom/balance-code',
+    'https://api.example.com/custom/balance-code?token=secret',
+    'https://api.example.com/custom/balance-code#fragment',
+    'ftp://api.example.com/custom/balance-code',
+  ])('rejects unsafe sub2api entry URL %s', (value) => {
+    expect(() => loadConfig(env({ SUB2API_ENTRY_URL: value }))).toThrow()
   })
 
   it('requires an HTTPS base URL in production', () => {

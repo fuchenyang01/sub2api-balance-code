@@ -70,6 +70,20 @@ describe('deployment contracts', () => {
     expect(envExample).toContain('REDEEM_ALLOWED_GROUP_ID=24')
   })
 
+  it('documents the validated sub2api re-entry URL required for expired sessions', () => {
+    const readme = repositoryFile('README.md')
+    const envExample = repositoryFile('.env.example')
+
+    expect(envExample).toContain(
+      'SUB2API_ENTRY_URL=https://sub2api.example.com/custom/balance-code',
+    )
+    expect(readme).toContain('SUB2API_ENTRY_URL=https://www.cyapi.cyou/custom/71038ae6498c1ecb')
+    expect(readme).toContain('必须与 `SUB2API_ORIGIN` 同源')
+    expect(readme).toContain('登录状态已过期')
+    expect(readme).toContain('重新进入余额转换')
+    expect(readme).toContain('主站仍显示登录')
+  })
+
   it('documents the allowed-group migration before replacing a deployment', () => {
     const readme = repositoryFile('README.md')
     const maintenance = sectionBetween(readme, '## 日常维护', '## 重要限制')

@@ -682,6 +682,17 @@ input[aria-invalid="true"] {
   margin-top: 14px;
 }
 
+.session-actions {
+  margin-top: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.session-actions a {
+  text-decoration: none;
+}
+
 .loading-indicator {
   width: 20px;
   height: 20px;

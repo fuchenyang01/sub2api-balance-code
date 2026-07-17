@@ -28,6 +28,7 @@ const appController = vi.hoisted((): {
   result: null | Record<string, unknown>
   history: Record<string, unknown>[]
   storageReady: boolean
+  publicConfig: null | { sub2api_entry_url: string }
 } => ({
   session: 'authenticated',
   sessionRef: null,
@@ -44,6 +45,7 @@ const appController = vi.hoisted((): {
   result: null,
   history: [],
   storageReady: true,
+  publicConfig: { sub2api_entry_url: 'https://sub2api.example.test/custom/balance-code' },
 }))
 
 const clipboardController = vi.hoisted(() => ({ copyText: vi.fn() }))
@@ -73,6 +75,7 @@ vi.mock('../../src/web/composables/useConversion.js', async (importOriginal) => 
         loading: ref(false),
         busy,
         storageReady: ref(appController.storageReady),
+        publicConfig: ref(appController.publicConfig),
         initialize: appController.initialize,
         refresh: appController.refresh,
         logout: vi.fn(),
@@ -103,6 +106,9 @@ beforeEach(() => {
   appController.result = null
   appController.history = []
   appController.storageReady = true
+  appController.publicConfig = {
+    sub2api_entry_url: 'https://sub2api.example.test/custom/balance-code',
+  }
   appController.convert.mockReset()
   appController.initialize.mockReset()
   appController.refresh.mockReset()
@@ -451,6 +457,25 @@ describe('HistoryList', () => {
 })
 
 describe('App', () => {
+  it('offers safe re-entry actions when the tool session expires', () => {
+    appController.session = 'expired'
+    appController.profile = null
+
+    const wrapper = mount(App)
+    const reentry = wrapper.get('[data-testid="session-reentry"]')
+    const portal = wrapper.get('[data-testid="open-sub2api"]')
+
+    expect(wrapper.text()).toContain('登录状态已过期')
+    expect(wrapper.text()).toContain('点击下方按钮重新进入，系统会自动获取最新登录状态。')
+    expect(reentry.text()).toBe('重新进入余额转换')
+    expect(reentry.attributes('href')).toBe('https://sub2api.example.test/custom/balance-code')
+    expect(reentry.attributes('target')).toBe('_self')
+    expect(portal.attributes('href')).toBe('https://sub2api.example.test')
+    expect(portal.attributes('target')).toBe('_blank')
+    expect(portal.attributes('rel')).toContain('noopener')
+    expect(portal.attributes('rel')).toContain('noreferrer')
+  })
+
   it('renders the usable tool immediately and opens confirmation without executing conversion', async () => {
     const wrapper = mount(App)
     expect(wrapper.text()).toContain('余额兑换码')

@@ -30,6 +30,7 @@ const config: Readonly<AppConfig> = Object.freeze({
   redeemAllowedGroupId: 24,
   appOrigin,
   sub2apiOrigin,
+  sub2apiEntryUrl: `${sub2apiOrigin}/custom/balance-code`,
   sessionSecret,
   operationSigningSecret: operationSecret,
   operationTtlMinutes: 60,
@@ -177,6 +178,23 @@ function expectClearedSessionCookie(value: string | string[] | undefined): void 
 afterEach(async () => {
   await Promise.all(apps.splice(0).map((app) => app.close()))
   await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
+})
+
+describe('public config route', () => {
+  it('exposes only the validated re-entry URL without requiring a session', async () => {
+    const { app } = await setup()
+
+    const response = await app.inject({ method: 'GET', url: '/api/config' })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toEqual({
+      sub2api_entry_url: `${sub2apiOrigin}/custom/balance-code`,
+    })
+    expect(response.body).not.toContain(config.sub2apiAdminApiKey)
+    expect(response.body).not.toContain(config.sessionSecret)
+    expect(response.body).not.toContain(config.operationSigningSecret)
+    expect(response.body).not.toContain(String(config.redeemAllowedGroupId))
+  })
 })
 
 describe('session routes', () => {
