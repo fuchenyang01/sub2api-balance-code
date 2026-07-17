@@ -116,14 +116,14 @@ function jwtExpiry(userJwt: string): Date {
 async function exchangeIdentity(
   users: UserClient,
   userJwt: string,
-  onAuthFailure: (error: UpstreamError) => void = () => undefined,
+  onAuthFailure: (error: UpstreamError) => void | Promise<void> = () => undefined,
 ): Promise<{ profile: Profile; expiresAt: Date }> {
   let profile: Profile
   try {
     profile = await users.getProfile(userJwt)
   } catch (error) {
     if (isUpstreamError(error, 'auth')) {
-      onAuthFailure(error)
+      await onAuthFailure(error)
       // The upstream remains the verifier; exp is decoded only to distinguish expiry safely.
       jwtExpiry(userJwt)
       throw new AppError('SESSION_INVALID', 401, '会话无效')
@@ -252,10 +252,20 @@ export function registerSessionRoutes(
       const { profile, expiresAt } = await exchangeIdentity(
         dependencies.users,
         userJwt,
-        (error) => {
+        async (error) => {
+          let authMeStatus: number | null = null
+          try {
+            authMeStatus =
+              dependencies.users.probeAuthentication === undefined
+                ? null
+                : await dependencies.users.probeAuthentication(userJwt)
+          } catch {
+            authMeStatus = null
+          }
           request.log.warn({
             upstream_status: error.status ?? null,
             upstream_reason: stableUpstreamReason(error.reason),
+            auth_me_status: authMeStatus,
             jwt_diagnostics: tokenDiagnostics(userJwt),
           }, 'sub2api rejected user token')
         },
