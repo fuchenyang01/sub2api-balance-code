@@ -101,6 +101,19 @@ describe('sub2api clients', () => {
     })
   })
 
+  it('probes auth/me with the same token and returns only its status', async () => {
+    handler = (request, response) => {
+      expect(request.method).toBe('GET')
+      expect(request.url).toBe('/api/v1/auth/me')
+      expect(request.headers.authorization).toBe('Bearer user-jwt')
+      response.writeHead(401, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ code: 'INVALID_TOKEN', message: 'PRIVATE RESPONSE BODY' }))
+    }
+    const client = new Sub2ApiUserClient(baseUrl, 1_000)
+
+    await expect(client.probeAuthentication('user-jwt')).resolves.toBe(401)
+  })
+
   it('generates one batch with one upstream request and isolated admin headers', async () => {
     const operationId = 'op-batch'
     const generated = [
@@ -236,6 +249,18 @@ describe('sub2api clients', () => {
     await expect(client.getProfile('user-jwt')).rejects.toSatisfy((error: unknown) =>
       isUpstreamError(error, 'auth'),
     )
+  })
+
+  it('preserves a sub2api string error code as the stable auth reason', async () => {
+    handler = (_request, response) =>
+      json(response, 401, { code: 'INVALID_TOKEN', message: 'Invalid token' })
+    const client = new Sub2ApiUserClient(baseUrl, 1_000)
+
+    await expect(client.getProfile('user-jwt')).rejects.toMatchObject({
+      kind: 'auth',
+      status: 401,
+      reason: 'INVALID_TOKEN',
+    })
   })
 
   it.each([

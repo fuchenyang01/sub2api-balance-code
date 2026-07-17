@@ -60,6 +60,9 @@ function jwt(exp: number = Math.floor(Date.now() / 1_000) + 3_600): string {
 
 class FakeUsers implements UserClient {
   calls: string[] = []
+  probeCalls: string[] = []
+  probeStatus: number | null = null
+  probeError: unknown
   currentProfile: Profile = profile
   error: unknown
 
@@ -67,6 +70,12 @@ class FakeUsers implements UserClient {
     this.calls.push(userJwt)
     if (this.error !== undefined) throw this.error
     return this.currentProfile
+  }
+
+  async probeAuthentication(userJwt: string): Promise<number | null> {
+    this.probeCalls.push(userJwt)
+    if (this.probeError !== undefined) throw this.probeError
+    return this.probeStatus
   }
 }
 
@@ -911,6 +920,7 @@ describe('security headers, rate limits, and logging', () => {
       },
     })
     const users = new FakeUsers()
+    users.probeStatus = 401
     const privateReason = 'PRIVATE RESPONSE DETAIL: account=alice'
     users.error = new UpstreamError('auth', 'UPSTREAM-PRIVATE-BODY', {
       status: 401,
@@ -940,6 +950,7 @@ describe('security headers, rate limits, and logging', () => {
       reqId: expect.any(String),
       upstream_status: 401,
       upstream_reason: null,
+      auth_me_status: 401,
       jwt_diagnostics: {
         fingerprint: expect.stringMatching(/^[a-f0-9]{16}$/),
         issued_at: new Date(issuedAt * 1_000).toISOString(),
@@ -949,6 +960,24 @@ describe('security headers, rate limits, and logging', () => {
     expect(output).not.toContain(userJwt)
     expect(output).not.toContain('UPSTREAM-PRIVATE-BODY')
     expect(output).not.toContain(privateReason)
+    expect(users.probeCalls).toEqual([userJwt])
+  })
+
+  it('keeps the original session rejection when the auth probe fails', async () => {
+    const users = new FakeUsers()
+    users.error = new UpstreamError('auth', 'Invalid token', {
+      status: 401,
+      reason: 'INVALID_TOKEN',
+    })
+    users.probeError = new Error('diagnostic network failure')
+    const { app } = await setup({ users })
+    const userJwt = jwt()
+
+    const response = await exchange(app, userJwt)
+
+    expect(response.statusCode).toBe(401)
+    stableError(response, 'SESSION_INVALID')
+    expect(users.probeCalls).toEqual([userJwt])
   })
 
   it('redacts credentials and query strings from real Pino output', async () => {

@@ -48,7 +48,7 @@ interface UpstreamRequestOptions<T> {
 }
 
 const errorEnvelopeSchema = z.object({
-  code: z.number(),
+  code: z.union([z.number(), z.string()]),
   message: z.string().optional(),
   reason: z.string().optional(),
   data: z.unknown().optional(),
@@ -163,7 +163,8 @@ export async function requestUpstream<T>(options: UpstreamRequestOptions<T>): Pr
   if (!response.ok) {
     const envelope = parsedErrorEnvelope.success ? parsedErrorEnvelope.data : undefined
     const rawMessage = envelope?.message ?? 'Upstream HTTP request failed'
-    const rawReason = envelope?.reason
+    const rawReason =
+      envelope?.reason ?? (typeof envelope?.code === 'string' ? envelope.code : undefined)
     const message = safeText(rawMessage, sensitiveValues)
     const reason = rawReason === undefined ? undefined : safeText(rawReason, sensitiveValues)
     throw new UpstreamError(errorKind(response.status, rawReason, rawMessage), message, {
