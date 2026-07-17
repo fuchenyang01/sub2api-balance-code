@@ -11,6 +11,10 @@ import { stableUpstreamReason, tokenDiagnostics } from '../security/token-diagno
 import { isUpstreamError } from '../sub2api/http.js'
 import type { UpstreamError } from '../sub2api/http.js'
 import type { Profile } from '../sub2api/types.js'
+import {
+  createUpstreamUserContext,
+  type UpstreamUserContext,
+} from '../sub2api/user-context.js'
 import type { UserClient } from '../sub2api/user-client.js'
 
 export const sessionCookieName = 'redeem_session'
@@ -25,12 +29,14 @@ export interface SessionSecrets {
 export interface AuthenticatedSession {
   userJwt: string
   userId: number
+  upstreamContext: UpstreamUserContext | undefined
   profile: Profile
 }
 
 export interface SessionIdentity {
   userJwt: string
   userId: number
+  upstreamContext: UpstreamUserContext | undefined
 }
 
 interface ReadSessionDependencies {
@@ -76,10 +82,11 @@ function upstreamUnavailable(): AppError {
 async function verifiedProfile(
   users: UserClient,
   userJwt: string,
+  upstreamContext: UpstreamUserContext | undefined,
   authErrorCode: 'SESSION_INVALID' | 'SESSION_EXPIRED',
 ): Promise<Profile> {
   try {
-    return await users.getProfile(userJwt)
+    return await users.getProfile(userJwt, upstreamContext)
   } catch (error) {
     if (isUpstreamError(error, 'auth')) {
       throw new AppError(authErrorCode, 401, '会话无效')
@@ -116,11 +123,12 @@ function jwtExpiry(userJwt: string): Date {
 async function exchangeIdentity(
   users: UserClient,
   userJwt: string,
+  upstreamContext: UpstreamUserContext | undefined,
   onAuthFailure: (error: UpstreamError) => void | Promise<void> = () => undefined,
 ): Promise<{ profile: Profile; expiresAt: Date }> {
   let profile: Profile
   try {
-    profile = await users.getProfile(userJwt)
+    profile = await users.getProfile(userJwt, upstreamContext)
   } catch (error) {
     if (isUpstreamError(error, 'auth')) {
       await onAuthFailure(error)
@@ -157,7 +165,11 @@ async function readSessionIdentity(
     throw upstreamUnavailable()
   }
 
-  return { userJwt: session.userJwt, userId: session.userId }
+  return {
+    userJwt: session.userJwt,
+    userId: session.userId,
+    upstreamContext: createUpstreamUserContext(request.headers['user-agent']),
+  }
 }
 
 async function revalidateSession(
@@ -167,7 +179,12 @@ async function revalidateSession(
 ): Promise<AuthenticatedSession> {
   let latest: Profile
   try {
-    latest = await verifiedProfile(dependencies.users, identity.userJwt, 'SESSION_EXPIRED')
+    latest = await verifiedProfile(
+      dependencies.users,
+      identity.userJwt,
+      identity.upstreamContext,
+      'SESSION_EXPIRED',
+    )
   } catch (error) {
     if (error instanceof AppError && error.code === 'SESSION_EXPIRED') {
       clearSessionCookie(reply, dependencies.config)
@@ -249,16 +266,18 @@ export function registerSessionRoutes(
     },
     async (request, reply) => {
       const userJwt = request.body.token
+      const upstreamContext = createUpstreamUserContext(request.headers['user-agent'])
       const { profile, expiresAt } = await exchangeIdentity(
         dependencies.users,
         userJwt,
+        upstreamContext,
         async (error) => {
           let authMeStatus: number | null = null
           try {
             authMeStatus =
               dependencies.users.probeAuthentication === undefined
                 ? null
-                : await dependencies.users.probeAuthentication(userJwt)
+                : await dependencies.users.probeAuthentication(userJwt, upstreamContext)
           } catch {
             authMeStatus = null
           }

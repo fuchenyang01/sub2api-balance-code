@@ -1,9 +1,19 @@
 import { requestUpstream } from './http.js'
 import { profileSchema, type Profile } from './types.js'
+import type { UpstreamUserContext } from './user-context.js'
 
 export interface UserClient {
-  getProfile(userJwt: string): Promise<Profile>
-  probeAuthentication?(userJwt: string): Promise<number | null>
+  getProfile(userJwt: string, context?: UpstreamUserContext): Promise<Profile>
+  probeAuthentication?(userJwt: string, context?: UpstreamUserContext): Promise<number | null>
+}
+
+function userHeaders(
+  userJwt: string,
+  context: UpstreamUserContext | undefined,
+): Record<string, string> {
+  const headers: Record<string, string> = { Authorization: `Bearer ${userJwt}` }
+  if (context !== undefined) headers['User-Agent'] = context.userAgent
+  return headers
 }
 
 export class Sub2ApiUserClient implements UserClient {
@@ -17,10 +27,10 @@ export class Sub2ApiUserClient implements UserClient {
     this.#fetchImpl = fetchImpl
   }
 
-  getProfile(userJwt: string): Promise<Profile> {
+  getProfile(userJwt: string, context?: UpstreamUserContext): Promise<Profile> {
     return requestUpstream({
       url: `${this.#baseUrl}/api/v1/user/profile`,
-      init: { headers: { Authorization: `Bearer ${userJwt}` } },
+      init: { headers: userHeaders(userJwt, context) },
       timeoutMs: this.#timeoutMs,
       dataSchema: profileSchema,
       fetchImpl: this.#fetchImpl,
@@ -28,10 +38,13 @@ export class Sub2ApiUserClient implements UserClient {
     })
   }
 
-  async probeAuthentication(userJwt: string): Promise<number | null> {
+  async probeAuthentication(
+    userJwt: string,
+    context?: UpstreamUserContext,
+  ): Promise<number | null> {
     try {
       const response = await this.#fetchImpl(`${this.#baseUrl}/api/v1/auth/me`, {
-        headers: { Authorization: `Bearer ${userJwt}` },
+        headers: userHeaders(userJwt, context),
         redirect: 'error',
         signal: AbortSignal.timeout(this.#timeoutMs),
       })

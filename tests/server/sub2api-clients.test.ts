@@ -19,6 +19,8 @@ const profile = {
   ignored: 'extra-field',
 }
 
+const upstreamContext = { userAgent: 'Browser-UA/123 (exact)' }
+
 const redeemCode = {
   id: 11,
   code: 'ABC-123',
@@ -81,18 +83,19 @@ describe('sub2api clients', () => {
     await closeServer(server)
   })
 
-  it('parses a profile and sends only the user authorization header', async () => {
+  it('parses a profile and sends only user credentials with the browser User-Agent', async () => {
     handler = (request, response) => {
       expect(request.method).toBe('GET')
       expect(request.url).toBe('/api/v1/user/profile')
       expect(request.headers.authorization).toBe('Bearer user-jwt')
+      expect(request.headers['user-agent']).toBe(upstreamContext.userAgent)
       expect(request.headers['x-api-key']).toBeUndefined()
       json(response, 200, { code: 0, message: 'success', metadata: {}, data: profile })
     }
 
     const client = new Sub2ApiUserClient(baseUrl, 1_000)
 
-    await expect(client.getProfile('user-jwt')).resolves.toEqual({
+    await expect(client.getProfile('user-jwt', upstreamContext)).resolves.toEqual({
       id: 7,
       username: 'alice',
       balance: 42.5,
@@ -101,17 +104,19 @@ describe('sub2api clients', () => {
     })
   })
 
-  it('probes auth/me with the same token and returns only its status', async () => {
+  it('probes auth/me with the same token and browser User-Agent', async () => {
     handler = (request, response) => {
       expect(request.method).toBe('GET')
       expect(request.url).toBe('/api/v1/auth/me')
       expect(request.headers.authorization).toBe('Bearer user-jwt')
+      expect(request.headers['user-agent']).toBe(upstreamContext.userAgent)
+      expect(request.headers['x-api-key']).toBeUndefined()
       response.writeHead(401, { 'content-type': 'application/json' })
       response.end(JSON.stringify({ code: 'INVALID_TOKEN', message: 'PRIVATE RESPONSE BODY' }))
     }
     const client = new Sub2ApiUserClient(baseUrl, 1_000)
 
-    await expect(client.probeAuthentication('user-jwt')).resolves.toBe(401)
+    await expect(client.probeAuthentication('user-jwt', upstreamContext)).resolves.toBe(401)
   })
 
   it('generates one batch with one upstream request and isolated admin headers', async () => {

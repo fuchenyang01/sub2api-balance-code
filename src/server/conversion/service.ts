@@ -17,6 +17,7 @@ import {
   type UpstreamErrorKind,
 } from '../sub2api/http.js'
 import type { RedeemCode } from '../sub2api/types.js'
+import type { UpstreamUserContext } from '../sub2api/user-context.js'
 import type { UserClient } from '../sub2api/user-client.js'
 import { KeyedMutex } from './keyed-mutex.js'
 
@@ -135,6 +136,7 @@ export class ConversionService {
     operationId: string,
     rawAmount: string,
     count: number,
+    context: UpstreamUserContext | undefined,
   ): Promise<PrepareResponse> {
     if (!validBatchCount(count)) {
       throw new AppError('AMOUNT_INVALID', 400, '数量格式无效')
@@ -142,7 +144,7 @@ export class ConversionService {
     const normalizedAmount = normalizeAmount(rawAmount)
     const amount = new Decimal(normalizedAmount)
     const totalAmount = amount.mul(count)
-    const profile = await this.#users.getProfile(userJwt)
+    const profile = await this.#users.getProfile(userJwt, context)
 
     if (profile.id !== userId) {
       throw new AppError('SESSION_INVALID', 401, '会话用户不一致')
@@ -171,15 +173,20 @@ export class ConversionService {
     operationToken: string,
     userJwt: string,
     userId: number,
+    context: UpstreamUserContext | undefined,
   ): Promise<ExecuteResponse> {
     await this.#secrets.verifyOperation(operationToken, userId)
     return this.#mutex.run(userId, async () => {
       const operation = await this.#secrets.verifyOperation(operationToken, userId)
-      return this.#executeLocked(operation, userJwt)
+      return this.#executeLocked(operation, userJwt, context)
     })
   }
 
-  async #executeLocked(operation: OperationPayload, userJwt: string): Promise<ExecuteResponse> {
+  async #executeLocked(
+    operation: OperationPayload,
+    userJwt: string,
+    context: UpstreamUserContext | undefined,
+  ): Promise<ExecuteResponse> {
     if (!validBatchCount(operation.count)) {
       throw new AppError('OPERATION_TOKEN_INVALID', 401, '操作令牌无效')
     }
@@ -190,7 +197,7 @@ export class ConversionService {
     let profile: Awaited<ReturnType<UserClient['getProfile']>>
 
     try {
-      profile = await this.#users.getProfile(userJwt)
+      profile = await this.#users.getProfile(userJwt, context)
     } catch (error) {
       throw executionProfileFailure(error)
     }
