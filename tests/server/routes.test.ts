@@ -902,6 +902,55 @@ describe('security headers, rate limits, and logging', () => {
     expect((await prepare(user8Cookie)).statusCode).toBe(200)
   })
 
+  it('logs token diagnostics when sub2api rejects an exchange', async () => {
+    let output = ''
+    const stream = new Writable({
+      write(chunk, _encoding, callback) {
+        output += chunk.toString()
+        callback()
+      },
+    })
+    const users = new FakeUsers()
+    const privateReason = 'PRIVATE RESPONSE DETAIL: account=alice'
+    users.error = new UpstreamError('auth', 'UPSTREAM-PRIVATE-BODY', {
+      status: 401,
+      reason: privateReason,
+    })
+    const app = buildApp({ ...config, logLevel: 'info' }, {
+      users,
+      conversions: new FakeConversions(),
+      secrets: secrets(),
+      loggerStream: stream,
+    })
+    apps.push(app)
+    await app.ready()
+    const issuedAt = Math.floor(Date.now() / 1_000) - 60
+    const expiresAt = issuedAt + 3_600
+    const userJwt = rawJwt({ iat: issuedAt, exp: expiresAt })
+
+    const response = await exchange(app, userJwt)
+    await new Promise<void>((resolve) => setImmediate(resolve))
+
+    expect(response.statusCode).toBe(401)
+    stableError(response, 'SESSION_INVALID')
+    const records = output.trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>)
+    const record = records.find((entry) => entry.msg === 'sub2api rejected user token')
+    expect(record).toMatchObject({
+      level: 40,
+      reqId: expect.any(String),
+      upstream_status: 401,
+      upstream_reason: null,
+      jwt_diagnostics: {
+        fingerprint: expect.stringMatching(/^[a-f0-9]{16}$/),
+        issued_at: new Date(issuedAt * 1_000).toISOString(),
+        expires_at: new Date(expiresAt * 1_000).toISOString(),
+      },
+    })
+    expect(output).not.toContain(userJwt)
+    expect(output).not.toContain('UPSTREAM-PRIVATE-BODY')
+    expect(output).not.toContain(privateReason)
+  })
+
   it('redacts credentials and query strings from real Pino output', async () => {
     let output = ''
     const stream = new Writable({
