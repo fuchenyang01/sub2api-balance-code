@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { ExecuteResponse } from '../../src/shared/contracts.js'
+import type { ExecuteResponse, PrepareResponse } from '../../src/shared/contracts.js'
 import { KeyedMutex } from '../../src/server/conversion/keyed-mutex.js'
 import { ConversionService } from '../../src/server/conversion/service.js'
 import { AppError } from '../../src/server/errors.js'
@@ -8,6 +8,7 @@ import { SecretsService, type OperationPayload } from '../../src/server/security
 import type { AdminClient } from '../../src/server/sub2api/admin-client.js'
 import { UpstreamError, type UpstreamErrorKind } from '../../src/server/sub2api/http.js'
 import type { RedeemCode } from '../../src/server/sub2api/types.js'
+import type { UpstreamUserContext } from '../../src/server/sub2api/user-context.js'
 import type { UserClient } from '../../src/server/sub2api/user-client.js'
 
 const now = '2026-07-13T08:00:00.000Z'
@@ -15,6 +16,7 @@ const expiresAt = '2026-07-13T08:10:00.000Z'
 const operationId = '11111111-1111-4111-8111-111111111111'
 const secondOperationId = '22222222-2222-4222-8222-222222222222'
 const userId = 7
+const upstreamContext: UpstreamUserContext = { userAgent: 'Browser-UA/service-test' }
 
 function deferred<T = void>(): {
   promise: Promise<T>
@@ -83,10 +85,15 @@ class FakeUserClient implements UserClient {
     allowed_groups: [24],
   }
   calls: string[] = []
+  contexts: Array<UpstreamUserContext | undefined> = []
   error: unknown
 
-  async getProfile(userJwt: string): Promise<typeof this.profile> {
+  async getProfile(
+    userJwt: string,
+    context?: UpstreamUserContext,
+  ): Promise<typeof this.profile> {
     this.calls.push(userJwt)
+    this.contexts.push(context)
     if (this.error !== undefined) throw this.error
     return this.profile
   }
@@ -127,18 +134,50 @@ class FakeSecrets {
 }
 
 class TestConversionService extends ConversionService {
+  prepare(
+    userJwt: string,
+    userId: number,
+    operationId: string,
+    rawAmount: string,
+    count: number,
+  ): Promise<PrepareResponse>
+  prepare(
+    userJwt: string,
+    userId: number,
+    operationId: string,
+    rawAmount: string,
+    count: number,
+    context: UpstreamUserContext,
+  ): Promise<PrepareResponse>
+  override prepare(
+    userJwt: string,
+    userId: number,
+    operationId: string,
+    rawAmount: string,
+    count: number,
+    context?: UpstreamUserContext,
+  ): Promise<PrepareResponse> {
+    return super.prepare(userJwt, userId, operationId, rawAmount, count, context)
+  }
+
   execute(operationToken: string, userId: number): Promise<ExecuteResponse>
-  execute(operationToken: string, userJwt: string, userId: number): Promise<ExecuteResponse>
+  execute(
+    operationToken: string,
+    userJwt: string,
+    userId: number,
+    context?: UpstreamUserContext,
+  ): Promise<ExecuteResponse>
   override execute(
     operationToken: string,
     userJwtOrUserId: string | number,
     explicitUserId?: number,
+    context?: UpstreamUserContext,
   ): Promise<ExecuteResponse> {
     const effectiveUserId = explicitUserId ?? userJwtOrUserId as number
     const userJwt = typeof userJwtOrUserId === 'string'
       ? userJwtOrUserId
       : `user-${effectiveUserId}-jwt`
-    return super.execute(operationToken, userJwt, effectiveUserId)
+    return super.execute(operationToken, userJwt, effectiveUserId, context)
   }
 }
 
@@ -261,6 +300,17 @@ describe('ConversionService.prepare', () => {
     expect(secrets.signed).toEqual([{ operationId, userId, amount: '2.5', count: 10 }])
   })
 
+  it('forwards the current upstream context without signing it', async () => {
+    const { service, users, secrets } = setup()
+
+    await service.prepare('user-jwt', userId, operationId, '10', 1, upstreamContext)
+
+    expect(users.contexts).toEqual([upstreamContext])
+    expect(secrets.signed).toHaveLength(1)
+    expect(secrets.signed[0]).not.toHaveProperty('upstreamContext')
+    expect(secrets.signed[0]).not.toHaveProperty('userAgent')
+  })
+
   it('preserves a normalized plain decimal that Decimal.toString would exponentiate', async () => {
     const { service, users, secrets } = setup()
     users.profile = { ...users.profile, balance: 1e22 }
@@ -337,6 +387,27 @@ describe('ConversionService.execute', () => {
       total_amount: '25',
     })
     expect(result.status === 'completed' && result.codes).toHaveLength(10)
+  })
+
+  it('forwards the current context into the locked profile revalidation', async () => {
+    const { service, users } = setup()
+
+    await service.execute('operation-token', 'user-jwt', userId, upstreamContext)
+
+    expect(users.contexts).toEqual([upstreamContext])
+  })
+
+  it('forwards context when profile auth fails before administrator side effects', async () => {
+    const { service, users, admin } = setup()
+    users.error = upstream('auth')
+
+    await expectAppError(
+      () => service.execute('operation-token', 'user-jwt', userId, upstreamContext),
+      'SESSION_EXPIRED',
+    )
+
+    expect(users.contexts).toEqual([upstreamContext])
+    expect(admin.calls).toEqual([])
   })
 
   it('supports the maximum count as one generation and one debit', async () => {
@@ -608,9 +679,9 @@ describe('ConversionService.execute', () => {
       await firstRelease.promise
     })
 
-    const first = service.execute(firstSigned.token, 'user-jwt', userId)
+    const first = service.execute(firstSigned.token, 'user-jwt', userId, undefined)
     await firstEntered.promise
-    const second = service.execute(secondSigned.token, 'user-jwt', userId)
+    const second = service.execute(secondSigned.token, 'user-jwt', userId, undefined)
     const secondExpectation = expectAppError(() => second, 'OPERATION_TOKEN_EXPIRED')
     await secondVerifiedOutside.promise
     currentTime = new Date('2026-07-13T08:01:01.000Z')

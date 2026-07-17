@@ -7,6 +7,7 @@ import type {
   PrepareResponse,
 } from '../../shared/contracts.js'
 import { MAX_BATCH_COUNT, MIN_BATCH_COUNT } from '../../shared/contracts.js'
+import type { UpstreamUserContext } from '../sub2api/user-context.js'
 import type { SessionReader } from './session.js'
 
 export interface ConversionOperations {
@@ -16,8 +17,14 @@ export interface ConversionOperations {
     operationId: string,
     rawAmount: string,
     count: number,
+    context: UpstreamUserContext | undefined,
   ): Promise<PrepareResponse>
-  execute(operationToken: string, userJwt: string, userId: number): Promise<ExecuteResponse>
+  execute(
+    operationToken: string,
+    userJwt: string,
+    userId: number,
+    context: UpstreamUserContext | undefined,
+  ): Promise<ExecuteResponse>
 }
 
 const uuidV4Pattern = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
@@ -104,6 +111,7 @@ export function registerConversionRoutes(
         request.body.operation_id,
         request.body.amount,
         request.body.count,
+        session.upstreamContext,
       )
     },
   )
@@ -125,6 +133,7 @@ export function registerConversionRoutes(
         request.body.operation_token,
         session.userJwt,
         session.userId,
+        session.upstreamContext,
       )
       return reply.code(response.status === 'pending' ? 202 : 200).send(response)
     },

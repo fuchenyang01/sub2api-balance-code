@@ -90,7 +90,9 @@ class FakeUsers implements UserClient {
 
 class FakeConversions {
   prepareCalls: Array<[string, number, string, string, number]> = []
+  prepareContexts: Array<UpstreamUserContext | undefined> = []
   executeCalls: Array<[string, string, number]> = []
+  executeContexts: Array<UpstreamUserContext | undefined> = []
   prepareError: unknown
   executeError: unknown
   executeResponse: ExecuteResponse = {
@@ -108,8 +110,10 @@ class FakeConversions {
     requestedOperationId: string,
     amount: string,
     count: number,
+    context: UpstreamUserContext | undefined,
   ): Promise<PrepareResponse> {
     this.prepareCalls.push([userJwt, userId, requestedOperationId, amount, count])
+    this.prepareContexts.push(context)
     if (this.prepareError !== undefined) throw this.prepareError
     return {
       operation_token: 'signed-operation-token',
@@ -120,8 +124,14 @@ class FakeConversions {
     }
   }
 
-  async execute(operationToken: string, userJwt: string, userId: number): Promise<ExecuteResponse> {
+  async execute(
+    operationToken: string,
+    userJwt: string,
+    userId: number,
+    context: UpstreamUserContext | undefined,
+  ): Promise<ExecuteResponse> {
     this.executeCalls.push([operationToken, userJwt, userId])
+    this.executeContexts.push(context)
     if (this.executeError !== undefined) throw this.executeError
     return this.executeResponse
   }
@@ -652,18 +662,21 @@ describe('protected conversions', () => {
   })
 
   it('prepares with the authenticated session JWT and user ID', async () => {
-    const { app, conversions } = await setup()
+    const { app, users, conversions } = await setup()
     const userJwt = jwt()
     const cookie = await cookieFor(app, userJwt)
+    const conversionUserAgent = 'Browser-UA/conversion-prepare'
     const response = await app.inject({
       method: 'POST',
       url: '/api/conversions/prepare?user_id=999',
-      headers: { origin: appOrigin, cookie },
+      headers: { origin: appOrigin, cookie, 'user-agent': conversionUserAgent },
       payload: { operation_id: operationId, amount: '12.50', count: 1 },
     })
 
     expect(response.statusCode).toBe(200)
     expect(conversions.prepareCalls).toEqual([[userJwt, 7, operationId, '12.50', 1]])
+    expect(users.contexts.at(-1)).toEqual({ userAgent: conversionUserAgent })
+    expect(conversions.prepareContexts).toEqual([{ userAgent: conversionUserAgent }])
     expect(response.json()).toEqual({
       operation_token: 'signed-operation-token',
       expires_at: '2026-07-13T01:00:00.000Z',
@@ -708,9 +721,10 @@ describe('protected conversions', () => {
     ['pending', 202],
     ['completed', 200],
   ] as const)('returns %s execution with the stable status', async (state, status) => {
-    const { app, conversions } = await setup()
+    const { app, users, conversions } = await setup()
     const userJwt = jwt()
     const cookie = await cookieFor(app, userJwt)
+    const conversionUserAgent = 'Browser-UA/conversion-execute'
     conversions.executeResponse =
       state === 'pending'
         ? { status: 'pending', operation_id: operationId, error: 'CONVERSION_PENDING' }
@@ -726,13 +740,15 @@ describe('protected conversions', () => {
     const response = await app.inject({
       method: 'POST',
       url: '/api/conversions/execute',
-      headers: { origin: appOrigin, cookie },
+      headers: { origin: appOrigin, cookie, 'user-agent': conversionUserAgent },
       payload: { operation_token: 'operation-secret-token' },
     })
 
     expect(response.statusCode).toBe(status)
     expect(response.json()).toEqual(conversions.executeResponse)
     expect(conversions.executeCalls).toEqual([['operation-secret-token', userJwt, 7]])
+    expect(users.contexts.at(-1)).toEqual({ userAgent: conversionUserAgent })
+    expect(conversions.executeContexts).toEqual([{ userAgent: conversionUserAgent }])
   })
 
   it.each([
