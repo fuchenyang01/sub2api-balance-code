@@ -7,7 +7,9 @@ import type { AppConfig } from '../config.js'
 import { AppError } from '../errors.js'
 import { requireRedeemAccess } from '../security/redeem-access.js'
 import type { SessionPayload } from '../security/secrets.js'
+import { tokenDiagnostics } from '../security/token-diagnostics.js'
 import { isUpstreamError } from '../sub2api/http.js'
+import type { UpstreamError } from '../sub2api/http.js'
 import type { Profile } from '../sub2api/types.js'
 import type { UserClient } from '../sub2api/user-client.js'
 
@@ -114,12 +116,14 @@ function jwtExpiry(userJwt: string): Date {
 async function exchangeIdentity(
   users: UserClient,
   userJwt: string,
+  onAuthFailure: (error: UpstreamError) => void = () => undefined,
 ): Promise<{ profile: Profile; expiresAt: Date }> {
   let profile: Profile
   try {
     profile = await users.getProfile(userJwt)
   } catch (error) {
     if (isUpstreamError(error, 'auth')) {
+      onAuthFailure(error)
       // The upstream remains the verifier; exp is decoded only to distinguish expiry safely.
       jwtExpiry(userJwt)
       throw new AppError('SESSION_INVALID', 401, '会话无效')
@@ -245,7 +249,17 @@ export function registerSessionRoutes(
     },
     async (request, reply) => {
       const userJwt = request.body.token
-      const { profile, expiresAt } = await exchangeIdentity(dependencies.users, userJwt)
+      const { profile, expiresAt } = await exchangeIdentity(
+        dependencies.users,
+        userJwt,
+        (error) => {
+          request.log.warn({
+            upstream_status: error.status ?? null,
+            upstream_reason: error.reason ?? null,
+            jwt_diagnostics: tokenDiagnostics(userJwt),
+          }, 'sub2api rejected user token')
+        },
+      )
       requireRedeemAccess(profile, dependencies.config.redeemAllowedGroupId)
       const session = await dependencies.secrets.sealSession({
         userJwt,

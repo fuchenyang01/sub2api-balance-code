@@ -76,7 +76,7 @@ expect(record).toMatchObject({
   msg: 'sub2api rejected user token',
   upstream_status: 401,
   upstream_reason: 'INVALID_TOKEN',
-  token: {
+  jwt_diagnostics: {
     fingerprint: expect.stringMatching(/^[a-f0-9]{16}$/),
     issued_at: expect.any(String),
     expires_at: expect.any(String),
@@ -98,7 +98,7 @@ expect(output).not.toContain('UPSTREAM-PRIVATE-BODY')
 request.log.warn({
   upstream_status: error.status,
   upstream_reason: error.reason ?? null,
-  token: tokenDiagnostics(userJwt),
+  jwt_diagnostics: tokenDiagnostics(userJwt),
 }, 'sub2api rejected user token')
 ```
 
@@ -122,4 +122,3 @@ request.log.warn({
 git add docs/superpowers/specs/2026-07-17-session-token-diagnostics-design.md docs/superpowers/plans/2026-07-17-session-token-diagnostics.md src/server/security/token-diagnostics.ts src/server/routes/session.ts tests/server/token-diagnostics.test.ts tests/server/routes.test.ts
 git commit -m "chore: add safe session token diagnostics"
 ```
-

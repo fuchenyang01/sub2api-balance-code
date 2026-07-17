@@ -902,6 +902,53 @@ describe('security headers, rate limits, and logging', () => {
     expect((await prepare(user8Cookie)).statusCode).toBe(200)
   })
 
+  it('logs token diagnostics when sub2api rejects an exchange', async () => {
+    let output = ''
+    const stream = new Writable({
+      write(chunk, _encoding, callback) {
+        output += chunk.toString()
+        callback()
+      },
+    })
+    const users = new FakeUsers()
+    users.error = new UpstreamError('auth', 'UPSTREAM-PRIVATE-BODY', {
+      status: 401,
+      reason: 'INVALID_TOKEN',
+    })
+    const app = buildApp({ ...config, logLevel: 'info' }, {
+      users,
+      conversions: new FakeConversions(),
+      secrets: secrets(),
+      loggerStream: stream,
+    })
+    apps.push(app)
+    await app.ready()
+    const issuedAt = Math.floor(Date.parse('2026-07-17T10:00:00.000Z') / 1_000)
+    const expiresAt = Math.floor(Date.parse('2099-07-17T12:00:00.000Z') / 1_000)
+    const userJwt = rawJwt({ iat: issuedAt, exp: expiresAt })
+
+    const response = await exchange(app, userJwt)
+    await new Promise<void>((resolve) => setImmediate(resolve))
+
+    expect(response.statusCode).toBe(401)
+    stableError(response, 'SESSION_INVALID')
+    const records = output.trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>)
+    const record = records.find((entry) => entry.msg === 'sub2api rejected user token')
+    expect(record).toMatchObject({
+      level: 40,
+      reqId: expect.any(String),
+      upstream_status: 401,
+      upstream_reason: 'INVALID_TOKEN',
+      jwt_diagnostics: {
+        fingerprint: expect.stringMatching(/^[a-f0-9]{16}$/),
+        issued_at: '2026-07-17T10:00:00.000Z',
+        expires_at: '2099-07-17T12:00:00.000Z',
+      },
+    })
+    expect(output).not.toContain(userJwt)
+    expect(output).not.toContain('UPSTREAM-PRIVATE-BODY')
+  })
+
   it('redacts credentials and query strings from real Pino output', async () => {
     let output = ''
     const stream = new Writable({
