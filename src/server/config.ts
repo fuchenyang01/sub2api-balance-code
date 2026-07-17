@@ -55,6 +55,11 @@ const baseUrlSchema = z
     return url.pathname === '/' ? url.origin : url.toString()
   })
 
+const sub2apiEntryUrlSchema = baseUrlSchema.refine(
+  (value) => /^\/custom\/[A-Za-z0-9_-]+$/.test(new URL(value).pathname),
+  'must point to one sub2api custom page',
+)
+
 const originSchema = z
   .string()
   .superRefine((value, context) => {
@@ -85,7 +90,7 @@ const envSchema = z.object({
   REDEEM_ALLOWED_GROUP_ID: requiredPositiveIntegerEnv,
   APP_ORIGIN: originSchema,
   SUB2API_ORIGIN: originSchema,
-  SUB2API_ENTRY_URL: baseUrlSchema,
+  SUB2API_ENTRY_URL: sub2apiEntryUrlSchema,
   SESSION_SECRET: secretSchema,
   OPERATION_SIGNING_SECRET: secretSchema,
   PORT: integerEnv(3000, 1, 65_535),

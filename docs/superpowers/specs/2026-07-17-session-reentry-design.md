@@ -8,7 +8,7 @@ sub2api 主站可以刷新自身登录状态，但已经打开的跨子域 ifram
 
 ## 目标
 
-会话失效时，让用户通过一次明确点击回到 sub2api 的余额转换自定义页面，由 sub2api 使用当前登录状态重新创建工具 iframe 并传入最新 JWT。整个过程不修改 sub2api 源码，不延长 JWT 有效期，也不在浏览器持久化 JWT。
+会话失效时，让用户通过一次明确点击进入 sub2api 同源的重新登录桥接页。桥接页只清理 sub2api 的旧认证存储，再转到带自定义页返回地址的登录页。登录成功后，sub2api 重新创建工具 iframe 并传入新 JWT。整个过程不修改 sub2api 源码，不延长 JWT 有效期，也不在工具中持久化 JWT。
 
 ## 非目标
 
@@ -16,7 +16,7 @@ sub2api 主站可以刷新自身登录状态，但已经打开的跨子域 ifram
 - 不把 JWT 写入 `localStorage`、`sessionStorage` 或普通 Cookie。
 - 不自动循环重试已经失效的 Token。
 - 不更改当前 `SameSite=Lax`、HttpOnly、Secure 会话 Cookie 策略。
-- 不修改 sub2api 自定义页面实现。
+- 不修改 sub2api 源码或自定义页实现。
 
 ## 配置
 
@@ -37,15 +37,15 @@ SUB2API_ENTRY_URL=https://www.cyapi.cyou/custom/71038ae6498c1ecb
 
 ## 服务端接口
 
-新增只读公开接口 `GET /api/config`，只返回：
+新增只读公开接口 `GET /api/config`，只返回由入口地址构造的同源重新登录 URL：
 
 ```json
 {
-  "sub2api_entry_url": "https://www.cyapi.cyou/custom/71038ae6498c1ecb"
+  "sub2api_relogin_url": "https://www.cyapi.cyou/balance-code-relogin?redirect=%2Fcustom%2F71038ae6498c1ecb"
 }
 ```
 
-该接口只返回前端重新进入所需的公开地址，不返回管理员 API Key、密钥、分组 ID 或其他运行环境信息。前端从已经过服务端同源校验的入口 URL 解析主站 origin。响应使用固定结构校验，并允许未建立工具会话的浏览器访问。
+该接口不返回管理员 API Key、密钥、分组 ID 或其他运行环境信息。前端从已经过服务端同源校验的地址解析主站 origin。响应使用固定结构校验，并允许未建立工具会话的浏览器访问。
 
 ## 前端行为
 
@@ -54,8 +54,8 @@ SUB2API_ENTRY_URL=https://www.cyapi.cyou/custom/71038ae6498c1ecb
 当状态为 `expired` 时，页面显示：
 
 - 标题：`登录状态已过期`
-- 说明：`点击下方按钮重新进入，系统会自动获取最新登录状态。`
-- 主操作：`重新进入余额转换`
+- 说明：`点击下方按钮重新登录，登录成功后会自动返回。`
+- 主操作：`重新登录并进入`
 - 次操作：`打开主站`
 
 主操作使用普通链接：工具位于 iframe 中时目标为 `_top`；位于独立窗口中时目标为 `_self`。次操作始终在新窗口打开 `SUB2API_ORIGIN`，并使用 `noopener noreferrer`。若父页面 sandbox 拦截顶层导航，用户仍可使用“打开主站”后从菜单重新进入。
@@ -65,8 +65,9 @@ SUB2API_ENTRY_URL=https://www.cyapi.cyou/custom/71038ae6498c1ecb
 1. 工具加载公开配置。
 2. 工具检测 `/api/me` 返回 `SESSION_REQUIRED`、`SESSION_INVALID` 或 `SESSION_EXPIRED`。
 3. 前端清除内存中的待交换旧 Token并进入 `expired` 状态。
-4. 用户点击“重新进入余额转换”，浏览器导航到配置的 sub2api 自定义页面。
-5. sub2api 传入最新 JWT，工具重新交换会话、校验用户与分组并加载实时资料。
+4. 用户点击“重新登录并进入”，浏览器导航到 sub2api 同源桥接页。
+5. 桥接页清除 `auth_token`、`auth_user`、`refresh_token`、`token_expires_at` 和 `pending_auth_session`，然后进入 `/login?redirect=/custom/...`。
+6. 登录成功后 sub2api 返回自定义页、传入新 JWT，工具重新交换会话、校验用户与分组并加载实时资料。
 
 配置接口失败时显示“服务暂时不可用”和“重试”；主站已退出时由 sub2api 展示登录页；新 JWT 仍被拒绝时继续显示失效状态且不自动循环；分组拒绝和上游故障保持各自现有页面。
 
@@ -75,5 +76,5 @@ SUB2API_ENTRY_URL=https://www.cyapi.cyou/custom/71038ae6498c1ecb
 - 配置测试覆盖同源 HTTPS、跨源、凭据、查询、fragment、生产 HTTP 和缺失变量。
 - 服务端测试确认未登录可读公开配置，且不泄露任何秘密。
 - 前端测试覆盖 iframe `_top`、独立窗口 `_self`、文案、两个入口与配置失败。
-- 端到端测试覆盖 iframe 会话失效后的重新进入链接，并保持正常交换流程通过。
+- 端到端测试覆盖 iframe 会话失效后清除旧认证状态、进入登录页和保留非认证设置，并保持正常交换流程通过。
 - 部署后检查 `/healthz`、`/api/config`、正常兑换、失效重入、权限拒绝和单实例约束。

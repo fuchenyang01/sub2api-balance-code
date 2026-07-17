@@ -28,7 +28,7 @@ const appController = vi.hoisted((): {
   result: null | Record<string, unknown>
   history: Record<string, unknown>[]
   storageReady: boolean
-  publicConfig: null | { sub2api_entry_url: string }
+  publicConfig: null | { sub2api_relogin_url: string }
 } => ({
   session: 'authenticated',
   sessionRef: null,
@@ -45,7 +45,9 @@ const appController = vi.hoisted((): {
   result: null,
   history: [],
   storageReady: true,
-  publicConfig: { sub2api_entry_url: 'https://sub2api.example.test/custom/balance-code' },
+  publicConfig: {
+    sub2api_relogin_url: 'https://sub2api.example.test/balance-code-relogin?redirect=%2Fcustom%2Fbalance-code',
+  },
 }))
 
 const clipboardController = vi.hoisted(() => ({ copyText: vi.fn() }))
@@ -107,7 +109,7 @@ beforeEach(() => {
   appController.history = []
   appController.storageReady = true
   appController.publicConfig = {
-    sub2api_entry_url: 'https://sub2api.example.test/custom/balance-code',
+    sub2api_relogin_url: 'https://sub2api.example.test/balance-code-relogin?redirect=%2Fcustom%2Fbalance-code',
   }
   appController.convert.mockReset()
   appController.initialize.mockReset()
@@ -466,9 +468,11 @@ describe('App', () => {
     const portal = wrapper.get('[data-testid="open-sub2api"]')
 
     expect(wrapper.text()).toContain('登录状态已过期')
-    expect(wrapper.text()).toContain('点击下方按钮重新进入，系统会自动获取最新登录状态。')
-    expect(reentry.text()).toBe('重新进入余额转换')
-    expect(reentry.attributes('href')).toBe('https://sub2api.example.test/custom/balance-code')
+    expect(wrapper.text()).toContain('点击下方按钮重新登录，登录成功后会自动返回。')
+    expect(reentry.text()).toBe('重新登录并进入')
+    expect(reentry.attributes('href')).toBe(
+      'https://sub2api.example.test/balance-code-relogin?redirect=%2Fcustom%2Fbalance-code',
+    )
     expect(reentry.attributes('target')).toBe('_self')
     expect(portal.attributes('href')).toBe('https://sub2api.example.test')
     expect(portal.attributes('target')).toBe('_blank')

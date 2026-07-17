@@ -52,7 +52,8 @@ beforeEach(() => {
 function api(overrides: Partial<ConversionApi> = {}): ConversionApi {
   return {
     config: vi.fn().mockResolvedValue({
-      sub2api_entry_url: 'https://sub2api.example.test/custom/balance-code',
+      sub2api_relogin_url:
+        'https://sub2api.example.test/balance-code-relogin?redirect=%2Fcustom%2Fbalance-code',
     }),
     exchange: vi.fn().mockResolvedValue(profile),
     me: vi.fn().mockResolvedValue(profile),
@@ -313,7 +314,8 @@ describe('useConversion initialization', () => {
     expect(document.documentElement.lang).toBe('zh-CN')
     expect(conversion.profile.value).toEqual(profile)
     expect(conversion.publicConfig.value).toEqual({
-      sub2api_entry_url: 'https://sub2api.example.test/custom/balance-code',
+      sub2api_relogin_url:
+        'https://sub2api.example.test/balance-code-relogin?redirect=%2Fcustom%2Fbalance-code',
     })
     expect(conversion.session.value).toBe('authenticated')
   })

@@ -31,7 +31,7 @@ export interface MeResponse {
 }
 
 export interface PublicConfigResponse {
-  sub2api_entry_url: string
+  sub2api_relogin_url: string
 }
 
 export const MIN_BATCH_COUNT = 1

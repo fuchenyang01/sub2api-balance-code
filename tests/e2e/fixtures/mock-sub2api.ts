@@ -1,4 +1,5 @@
 import { once } from 'node:events'
+import { readFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 
@@ -29,6 +30,8 @@ export interface MockSub2Api {
 
 const USER_ID = 7
 const ADMIN_API_KEY = 'admin-e2e-only-not-a-production-credential'
+const RELOGIN_HTML = readFileSync(new URL('../../../deploy/sub2api-relogin.html', import.meta.url), 'utf8')
+const RELOGIN_SCRIPT = readFileSync(new URL('../../../deploy/sub2api-relogin.js', import.meta.url), 'utf8')
 
 export const mockAdminApiKey = ADMIN_API_KEY
 
@@ -96,6 +99,27 @@ export async function startMockSub2Api(): Promise<MockSub2Api> {
 
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? '/', 'http://mock.local')
+    if (request.method === 'GET' && url.pathname === '/balance-code-relogin') {
+      response.writeHead(200, {
+        'cache-control': 'no-store',
+        'content-type': 'text/html; charset=utf-8',
+      })
+      response.end(RELOGIN_HTML)
+      return
+    }
+    if (request.method === 'GET' && url.pathname === '/balance-code-relogin.js') {
+      response.writeHead(200, {
+        'cache-control': 'no-store',
+        'content-type': 'text/javascript; charset=utf-8',
+      })
+      response.end(RELOGIN_SCRIPT)
+      return
+    }
+    if (request.method === 'GET' && url.pathname === '/login') {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+      response.end('<!doctype html><html><body><h1>登录</h1></body></html>')
+      return
+    }
     if (request.method === 'GET' && url.pathname === '/e2e-parent') {
       if (iframeChildUrl === null) {
         json(response, 503, { code: 1, message: 'iframe child is not configured' })

@@ -52,14 +52,18 @@ const meResponseSchema = z.object({
   balance: finitePlainDecimalSchema,
 }).strict()
 const publicConfigResponseSchema = z.object({
-  sub2api_entry_url: z.string().max(2_048).refine((value) => {
+  sub2api_relogin_url: z.string().max(2_048).refine((value) => {
     try {
       const url = new URL(value)
+      const redirect = url.searchParams.get('redirect')
       return ['http:', 'https:'].includes(url.protocol)
         && url.username === ''
         && url.password === ''
-        && url.search === ''
         && url.hash === ''
+        && url.pathname === '/balance-code-relogin'
+        && [...url.searchParams.keys()].length === 1
+        && redirect !== null
+        && /^\/custom\/[A-Za-z0-9_-]+$/.test(redirect)
     } catch {
       return false
     }

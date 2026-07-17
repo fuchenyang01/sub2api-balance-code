@@ -42,7 +42,7 @@ test('exchanges the URL token across same-site origins and keeps the cookie usab
   expectNoBrowserErrors(errors)
 })
 
-test('offers top-level re-entry after the iframe tool session is lost', async ({
+test('clears stale sub2api auth before login and returns to the tool entry', async ({
   page,
   context,
   environment,
@@ -52,18 +52,69 @@ test('offers top-level re-entry after the iframe tool session is lost', async ({
   await expect(tool.getByText('测试用户')).toBeVisible()
 
   await context.clearCookies()
+  await page.evaluate(() => {
+    localStorage.setItem('auth_token', 'expired-access-token')
+    localStorage.setItem('auth_user', JSON.stringify({ id: 7 }))
+    localStorage.setItem('refresh_token', 'expired-refresh-token')
+    localStorage.setItem('token_expires_at', '0')
+    localStorage.setItem('pending_auth_session', 'stale-pending-session')
+    localStorage.setItem('unrelated_preference', 'keep-me')
+  })
   const frame = page.frames().find((candidate: Frame) => candidate !== page.mainFrame())
   expect(frame).toBeDefined()
   await frame!.goto(frame!.url())
 
   await expect(tool.getByRole('heading', { name: '登录状态已过期' })).toBeVisible()
   const reentry = tool.getByTestId('session-reentry')
-  await expect(reentry).toHaveAttribute('href', `${environment.mock.origin}/custom/balance-code`)
+  await expect(reentry).toHaveAttribute(
+    'href',
+    `${environment.mock.origin}/balance-code-relogin?redirect=%2Fcustom%2Fbalance-code`,
+  )
   await expect(reentry).toHaveAttribute('target', '_top')
   const portal = tool.getByTestId('open-sub2api')
   await expect(portal).toHaveAttribute('href', environment.mock.origin)
   await expect(portal).toHaveAttribute('target', '_blank')
+
+  await reentry.click()
+  const expectedRedirect = '/custom/balance-code'
+  await expect(page).toHaveURL((url) => (
+    url.origin === environment.mock.origin
+      && url.pathname === '/login'
+      && url.searchParams.get('redirect') === expectedRedirect
+  ))
+  expect(await page.evaluate(() => ({
+    authToken: localStorage.getItem('auth_token'),
+    authUser: localStorage.getItem('auth_user'),
+    refreshToken: localStorage.getItem('refresh_token'),
+    expiresAt: localStorage.getItem('token_expires_at'),
+    pendingAuth: localStorage.getItem('pending_auth_session'),
+    unrelated: localStorage.getItem('unrelated_preference'),
+  }))).toEqual({
+    authToken: null,
+    authUser: null,
+    refreshToken: null,
+    expiresAt: null,
+    pendingAuth: null,
+    unrelated: 'keep-me',
+  })
   await page.screenshot({ path: testInfo.outputPath('session-reentry.png'), fullPage: true })
+})
+
+test('falls back to the plain login page when the relogin redirect is malformed', async ({
+  page,
+  environment,
+}) => {
+  await page.goto(environment.iframeParentUrl())
+  await page.evaluate(() => localStorage.setItem('auth_token', 'expired-access-token'))
+
+  await page.goto(`${environment.mock.origin}/balance-code-relogin?redirect=${encodeURIComponent('http://[')}`)
+
+  await expect(page).toHaveURL((url) => (
+    url.origin === environment.mock.origin
+      && url.pathname === '/login'
+      && url.search === ''
+  ))
+  expect(await page.evaluate(() => localStorage.getItem('auth_token'))).toBeNull()
 })
 
 test('copies a completed code without clipboard-write delegation from the parent iframe', async ({

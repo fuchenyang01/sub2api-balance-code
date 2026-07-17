@@ -212,6 +212,45 @@ sudo nginx -t
 sudo systemctl reload nginx
 ```
 
+再把重新登录桥接页安装到 sub2api 主站域名。先复制两个静态文件：
+
+```bash
+sudo install -d -m 0755 /var/www/sub2api-balance-code
+sudo install -m 0644 deploy/sub2api-relogin.html /var/www/sub2api-balance-code/
+sudo install -m 0644 deploy/sub2api-relogin.js /var/www/sub2api-balance-code/
+```
+
+在 sub2api 主站的 HTTPS `server {}` 中加入下面两个精确路由，不要新建另一个 `server {}`：
+
+```nginx
+location = /balance-code-relogin {
+    alias /var/www/sub2api-balance-code/sub2api-relogin.html;
+    default_type text/html;
+    add_header Content-Security-Policy "default-src 'none'; script-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header Cache-Control "no-store" always;
+}
+
+location = /balance-code-relogin.js {
+    alias /var/www/sub2api-balance-code/sub2api-relogin.js;
+    default_type text/javascript;
+    add_header Content-Security-Policy "default-src 'none'; frame-ancestors 'none'" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header Cache-Control "no-store" always;
+}
+```
+
+然后检查并重载 Nginx：
+
+```bash
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
 申请证书：
 
 ```bash
@@ -236,7 +275,7 @@ curl -fsS https://code.example.com/healthz && echo
 
 URL 只填工具根地址。不要手工添加 Token、用户 ID 或管理员 API Key。
 
-当前 CYAPI 部署的重新进入地址是 `SUB2API_ENTRY_URL=https://www.cyapi.cyou/custom/71038ae6498c1ecb`。主站仍显示登录但工具提示“登录状态已过期”时，点击“重新进入余额转换”即可获取当前登录状态；不要只刷新 iframe。
+当前 CYAPI 的返回地址是 `SUB2API_ENTRY_URL=https://www.cyapi.cyou/custom/71038ae6498c1ecb`。工具提示“登录状态已过期”时，点击“重新登录并进入”，重新登录后会自动返回余额转换页。
 
 sub2api 菜单本身不能按专属分组隐藏，因此未授权用户可能看见入口，但服务端会返回 `403 / REDEEM_ACCESS_DENIED`。
 
@@ -262,7 +301,7 @@ sub2api 菜单本身不能按专属分组隐藏，因此未授权用户可能看
 | `REDEEM_ALLOWED_GROUP_ID` | 允许兑换的专属分组数字 ID |
 | `APP_ORIGIN` | 工具对外访问 origin |
 | `SUB2API_ORIGIN` | sub2api origin，用于来源校验和 iframe CSP |
-| `SUB2API_ENTRY_URL` | sub2api 自定义页面完整地址，用于会话失效后重新进入 |
+| `SUB2API_ENTRY_URL` | sub2api 自定义页面完整地址，用于重新登录后自动返回 |
 | `SESSION_SECRET` | 加密用户会话，至少 32 字节 |
 | `OPERATION_SIGNING_SECRET` | 签名操作令牌，至少 32 字节且不能复用会话密钥 |
 | `TRUST_PROXY` | 本机 Nginx 反代时设为 `true` |
@@ -284,6 +323,9 @@ sudo docker logs --tail 100 sub2api-balance-code
 ```bash
 cd /opt/sub2api-balance-code
 git pull --ff-only
+sudo install -d -m 0755 /var/www/sub2api-balance-code
+sudo install -m 0644 deploy/sub2api-relogin.html /var/www/sub2api-balance-code/
+sudo install -m 0644 deploy/sub2api-relogin.js /var/www/sub2api-balance-code/
 ```
 
 对照最新的 `.env.example`，确认 `.env` 中存在以下配置，并按实际专属分组 ID 填写。缺少该变量会导致新容器拒绝启动。

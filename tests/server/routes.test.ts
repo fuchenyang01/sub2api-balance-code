@@ -188,7 +188,8 @@ describe('public config route', () => {
 
     expect(response.statusCode).toBe(200)
     expect(response.json()).toEqual({
-      sub2api_entry_url: `${sub2apiOrigin}/custom/balance-code`,
+      sub2api_relogin_url:
+        `${sub2apiOrigin}/balance-code-relogin?redirect=%2Fcustom%2Fbalance-code`,
     })
     expect(response.body).not.toContain(config.sub2apiAdminApiKey)
     expect(response.body).not.toContain(config.sessionSecret)

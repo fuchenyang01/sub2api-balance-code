@@ -16,7 +16,7 @@ const conversion = useConversion()
 const confirmation = ref<ConversionDraft | null>(null)
 const pendingHidden = ref(false)
 const authenticated = computed(() => conversion.session.value === 'authenticated' && conversion.profile.value !== null)
-const reentryUrl = computed(() => conversion.publicConfig.value?.sub2api_entry_url ?? '')
+const reentryUrl = computed(() => conversion.publicConfig.value?.sub2api_relogin_url ?? '')
 const sub2apiOrigin = computed(() => reentryUrl.value === '' ? '' : new URL(reentryUrl.value).origin)
 const reentryTarget = sessionReentryTarget(window.self !== window.top)
 
@@ -121,14 +121,14 @@ onMounted(() => {
         <LockKeyhole :size="24" aria-hidden="true" />
         <div>
           <h1 id="session-title">登录状态已过期</h1>
-          <p>点击下方按钮重新进入，系统会自动获取最新登录状态。</p>
+          <p>点击下方按钮重新登录，登录成功后会自动返回。</p>
           <div class="session-actions">
             <a
               class="primary-button"
               data-testid="session-reentry"
               :href="reentryUrl"
               :target="reentryTarget"
-            >重新进入余额转换</a>
+            >重新登录并进入</a>
             <a
               class="secondary-button"
               data-testid="open-sub2api"

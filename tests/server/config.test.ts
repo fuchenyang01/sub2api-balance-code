@@ -216,6 +216,15 @@ describe('loadConfig', () => {
     expect(() => loadConfig(env({ SUB2API_ENTRY_URL: value }))).toThrow()
   })
 
+  it.each([
+    'https://api.example.com/dashboard',
+    'https://api.example.com/custom',
+    'https://api.example.com/custom/',
+    'https://api.example.com/custom/balance-code/extra',
+  ])('rejects a non-custom-page sub2api entry URL %s', (value) => {
+    expect(() => loadConfig(env({ SUB2API_ENTRY_URL: value }))).toThrow()
+  })
+
   it('requires an HTTPS base URL in production', () => {
     expect(() =>
       loadConfig(env({ NODE_ENV: 'production', SUB2API_BASE_URL: 'http://example.com' })),

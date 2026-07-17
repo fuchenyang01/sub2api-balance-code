@@ -70,9 +70,11 @@ describe('deployment contracts', () => {
     expect(envExample).toContain('REDEEM_ALLOWED_GROUP_ID=24')
   })
 
-  it('documents the validated sub2api re-entry URL required for expired sessions', () => {
+  it('ships and documents the same-origin relogin bridge required for expired sessions', () => {
     const readme = repositoryFile('README.md')
     const envExample = repositoryFile('.env.example')
+    const bridgeHtml = repositoryFile('deploy/sub2api-relogin.html')
+    const bridgeScript = repositoryFile('deploy/sub2api-relogin.js')
 
     expect(envExample).toContain(
       'SUB2API_ENTRY_URL=https://sub2api.example.com/custom/balance-code',
@@ -80,8 +82,18 @@ describe('deployment contracts', () => {
     expect(readme).toContain('SUB2API_ENTRY_URL=https://www.cyapi.cyou/custom/71038ae6498c1ecb')
     expect(readme).toContain('必须与 `SUB2API_ORIGIN` 同源')
     expect(readme).toContain('登录状态已过期')
-    expect(readme).toContain('重新进入余额转换')
-    expect(readme).toContain('主站仍显示登录')
+    expect(readme).toContain('重新登录并进入')
+    expect(readme).toContain('deploy/sub2api-relogin.html')
+    expect(readme).toContain('deploy/sub2api-relogin.js')
+    expect(readme).toContain('location = /balance-code-relogin')
+    expect(readme).toContain('location = /balance-code-relogin.js')
+    expect(readme).toContain("frame-ancestors 'none'")
+    expect(readme).toContain('X-Content-Type-Options "nosniff" always')
+    expect(readme).toContain('Referrer-Policy "no-referrer" always')
+    expect(readme).toContain('Cache-Control "no-store" always')
+    expect(bridgeHtml).toContain('<script src="/balance-code-relogin.js" defer></script>')
+    expect(bridgeScript).toContain("localStorage.removeItem(key)")
+    expect(bridgeScript).toContain("new URL('/login', window.location.origin)")
   })
 
   it('documents the allowed-group migration before replacing a deployment', () => {
