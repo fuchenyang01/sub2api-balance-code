@@ -8,7 +8,7 @@
 
 当 `/api/session/exchange` 收到 sub2api 的认证拒绝时，独立工具写入一条结构化警告日志。日志只包含：
 
-- sub2api HTTP 状态码和稳定错误原因；
+- sub2api HTTP 状态码和稳定错误原因；错误原因只允许最长 64 字符的全大写错误码格式，其余记录为 `null`；
 - JWT 的 `iat`、`exp` 对应 UTC 时间；
 - JWT SHA-256 摘要的短前缀，用于比较两次请求是否为同一 Token；
 - 当前请求 ID，由现有 Fastify 日志自动关联。

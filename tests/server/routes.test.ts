@@ -911,9 +911,10 @@ describe('security headers, rate limits, and logging', () => {
       },
     })
     const users = new FakeUsers()
+    const privateReason = 'PRIVATE RESPONSE DETAIL: account=alice'
     users.error = new UpstreamError('auth', 'UPSTREAM-PRIVATE-BODY', {
       status: 401,
-      reason: 'INVALID_TOKEN',
+      reason: privateReason,
     })
     const app = buildApp({ ...config, logLevel: 'info' }, {
       users,
@@ -923,8 +924,8 @@ describe('security headers, rate limits, and logging', () => {
     })
     apps.push(app)
     await app.ready()
-    const issuedAt = Math.floor(Date.parse('2026-07-17T10:00:00.000Z') / 1_000)
-    const expiresAt = Math.floor(Date.parse('2099-07-17T12:00:00.000Z') / 1_000)
+    const issuedAt = Math.floor(Date.now() / 1_000) - 60
+    const expiresAt = issuedAt + 3_600
     const userJwt = rawJwt({ iat: issuedAt, exp: expiresAt })
 
     const response = await exchange(app, userJwt)
@@ -938,15 +939,16 @@ describe('security headers, rate limits, and logging', () => {
       level: 40,
       reqId: expect.any(String),
       upstream_status: 401,
-      upstream_reason: 'INVALID_TOKEN',
+      upstream_reason: null,
       jwt_diagnostics: {
         fingerprint: expect.stringMatching(/^[a-f0-9]{16}$/),
-        issued_at: '2026-07-17T10:00:00.000Z',
-        expires_at: '2099-07-17T12:00:00.000Z',
+        issued_at: new Date(issuedAt * 1_000).toISOString(),
+        expires_at: new Date(expiresAt * 1_000).toISOString(),
       },
     })
     expect(output).not.toContain(userJwt)
     expect(output).not.toContain('UPSTREAM-PRIVATE-BODY')
+    expect(output).not.toContain(privateReason)
   })
 
   it('redacts credentials and query strings from real Pino output', async () => {

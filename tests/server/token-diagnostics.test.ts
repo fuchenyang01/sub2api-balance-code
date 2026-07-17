@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 
-import { tokenDiagnostics } from '../../src/server/security/token-diagnostics.js'
+import {
+  stableUpstreamReason,
+  tokenDiagnostics,
+} from '../../src/server/security/token-diagnostics.js'
 
 function jwt(payload: Record<string, unknown>, signature = 'signature'): string {
   const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url')
@@ -40,5 +43,16 @@ describe('token diagnostics', () => {
       issued_at: null,
       expires_at: null,
     })
+  })
+
+  it.each([
+    ['INVALID_TOKEN', 'INVALID_TOKEN'],
+    ['TOKEN_REVOKED_2', 'TOKEN_REVOKED_2'],
+    ['PRIVATE RESPONSE DETAIL: account=alice', null],
+    ['invalid_token', null],
+    ['A'.repeat(65), null],
+    [undefined, null],
+  ] as const)('keeps only stable upstream reason codes: %s', (reason, expected) => {
+    expect(stableUpstreamReason(reason)).toBe(expected)
   })
 })

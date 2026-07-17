@@ -8,6 +8,12 @@ export interface TokenDiagnostics {
   expires_at: string | null
 }
 
+const stableReasonPattern = /^[A-Z][A-Z0-9_]{0,63}$/
+
+export function stableUpstreamReason(reason: unknown): string | null {
+  return typeof reason === 'string' && stableReasonPattern.test(reason) ? reason : null
+}
+
 function numericDate(value: unknown): string | null {
   if (typeof value !== 'number' || !Number.isSafeInteger(value)) return null
   const date = new Date(value * 1_000)

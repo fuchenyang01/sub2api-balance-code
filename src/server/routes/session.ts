@@ -7,7 +7,7 @@ import type { AppConfig } from '../config.js'
 import { AppError } from '../errors.js'
 import { requireRedeemAccess } from '../security/redeem-access.js'
 import type { SessionPayload } from '../security/secrets.js'
-import { tokenDiagnostics } from '../security/token-diagnostics.js'
+import { stableUpstreamReason, tokenDiagnostics } from '../security/token-diagnostics.js'
 import { isUpstreamError } from '../sub2api/http.js'
 import type { UpstreamError } from '../sub2api/http.js'
 import type { Profile } from '../sub2api/types.js'
@@ -255,7 +255,7 @@ export function registerSessionRoutes(
         (error) => {
           request.log.warn({
             upstream_status: error.status ?? null,
-            upstream_reason: error.reason ?? null,
+            upstream_reason: stableUpstreamReason(error.reason),
             jwt_diagnostics: tokenDiagnostics(userJwt),
           }, 'sub2api rejected user token')
         },

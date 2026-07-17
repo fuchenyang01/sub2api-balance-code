@@ -12,7 +12,7 @@
 
 ## 文件结构
 
-- 创建：`src/server/security/token-diagnostics.ts`，生成不可逆摘要和安全时间字段。
+- 创建：`src/server/security/token-diagnostics.ts`，生成不可逆摘要、安全时间字段，并过滤上游稳定错误码。
 - 修改：`src/server/routes/session.ts`，在上游认证失败边界写脱敏日志。
 - 创建：`tests/server/token-diagnostics.test.ts`，覆盖纯诊断函数。
 - 修改：`tests/server/routes.test.ts`，覆盖认证失败日志及敏感信息不泄漏。
@@ -97,12 +97,12 @@ expect(output).not.toContain('UPSTREAM-PRIVATE-BODY')
 ```ts
 request.log.warn({
   upstream_status: error.status,
-  upstream_reason: error.reason ?? null,
+  upstream_reason: stableUpstreamReason(error.reason),
   jwt_diagnostics: tokenDiagnostics(userJwt),
 }, 'sub2api rejected user token')
 ```
 
-通过一个仅在 `exchangeIdentity` 捕获上游认证错误时执行的回调传入 `request.log`，不改变成功路径、状态码或响应内容。
+通过一个仅在 `exchangeIdentity` 捕获上游认证错误时执行的回调传入 `request.log`，不改变成功路径、状态码或响应内容。`stableUpstreamReason` 只保留匹配 `^[A-Z][A-Z0-9_]{0,63}$` 的错误码，自由文本不会进入日志。
 
 - [ ] **步骤 8：运行定向测试并验证绿灯**
 
